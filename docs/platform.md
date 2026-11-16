@@ -1,7 +1,8 @@
 # Outrigger platform: a messaging platform for outrigger clients (proposal)
 
-Date: 2026-11-16. Status: proposal. Extends spec.md (protocol v1) and
-replaces phase 2 of the sidebar's proposal 13.
+Date: 2026-11-16. Status: proposal; open questions answered against the Hermes
+v0.23.1 source (section 5). Extends spec.md (protocol v1) and replaces phase 2
+of the sidebar's proposal 13.
 
 ## 1. Why
 
@@ -135,11 +136,14 @@ fallback is used, so a minimal client still gets something readable.
 - **Allowlist.** `allowed_users_env="OUTRIGGER_ALLOWED_USERS"`, with
   `allowlist_suppresses_pairing=True`. Never `trusted_inbound`: these are human
   chat clients.
-- **Tool binding** (v1 tools on platform chats). The client's tools must bind
-  to the platform session. The plugin records which client sent each
-  `chat.send` and binds that client to the `session_id` the next
-  `pre_llm_call` reports for `platform == "outrigger"` and that sender.
-  Open question 2 covers whether a cleaner key exists.
+- **Tool binding** (v1 tools on platform chats). No binding step is needed.
+  On an outrigger-platform turn, `outrigger_call` and `pre_llm_call` read
+  `HERMES_SESSION_PLATFORM` and `HERMES_SESSION_CHAT_ID` through the public
+  `gateway.session_context.get_session_env`, and the namespaced chat id names
+  the client and conversation directly (answer 2).
+- **Actions are scoped to the client's own chats.** `chat.action` and
+  `chat.stop` are accepted only for chat ids in the sending client's namespace,
+  so one client cannot answer another client's approval or picker.
 
 ### 3.4 Registration and packaging
 
@@ -182,30 +186,76 @@ toolset on outrigger chats, plus whatever else the owner wants there.
 - **History:** `chat.history` reloads a conversation when the panel reopens
   (sidebar proposal 5).
 
-## 5. Open questions (verify before building)
+## 5. Open questions, answered (2026-11-16, Hermes v0.23.1 source)
 
-1. **Can a non-`kind: platform` plugin call `ctx.register_platform`?** This
-   plugin must load eagerly (tools, hooks, route), while `kind: platform`
-   plugins are deferred. If it can't, ship the adapter as a second plugin
-   directory in this repo (`outrigger-platform/`, `kind: platform`) with this
-   one as a declared `requires_plugins` dependency. The two would share state
-   through an explicit, versioned handle the core plugin exposes, never through
-   imports of each other's internals.
-2. **Session binding for tools.** Check that `pre_llm_call`'s `session_id`,
-   `platform` and `sender_id` are enough to bind tools deterministically when one
-   client has several chats, or whether `handle_message`'s session key is
-   observable through a documented route.
-3. **Command catalog for autocomplete.** Discord registers native commands from
-   the command registry. Find a public way to list commands (name, args hint,
-   description) for a platform; if none exists, the adapter sends a static list
-   generated at build time, and an upstream request is filed.
-4. **Picker payloads.** Confirm the `send_model_picker` / `send_choice_picker`
-   signatures and selection callbacks against the Discord and Telegram adapters
-   (the reference implementations), and whether provider lists are paged (Discord
-   shows at most 25 options).
-5. **Approval ownership.** `approval_refusal(...)` decides who may answer an
-   approval card. With the shared key everyone is the owner. With M4 tokens,
-   check that only the requester's client can resolve it.
+1. **Can this (eagerly loaded) plugin call `ctx.register_platform`? Yes.**
+   - `PluginContext.register_platform` (`hermes_cli/plugins_context.py:585`)
+     doesn't check the plugin's kind. It puts a `PlatformEntry` in the same
+     `platform_registry` that `kind: platform` plugins use, and
+     `gateway/config.py` looks platforms up there after plugin discovery.
+   - So the adapter ships inside this plugin; no second plugin is needed.
+   - The platform connects when `gateway.platforms.outrigger.enabled: true` is
+     set and the entry's `validate_config` (or `is_connected`) returns true.
+     `env_enablement_fn` can enable it from an env var instead.
+2. **How do tools find the chat? Through the session context, no correlation needed.**
+   - The public `gateway.session_context.get_session_env` (listed in
+     `plugins/public-api.md`) reads the task-local `HERMES_SESSION_PLATFORM`,
+     `HERMES_SESSION_CHAT_ID`, `HERMES_SESSION_USER_ID`, `HERMES_SESSION_KEY`
+     and `HERMES_SESSION_MESSAGE_ID`.
+   - The gateway binds them per turn (`set_session_vars`), and the tool executor
+     copies the context into worker threads (`propagate_context_to_thread`,
+     `agent/tool_executor.py:945`).
+   - So `outrigger_call` and `pre_llm_call` read the chat id directly, which
+     works with several chats per client.
+   - The alternatives were worse: `post_gateway_admission` has `session_key`
+     and `source` but no `session_id`; `pre_llm_call` has `session_id` but no
+     chat id.
+   - To confirm live in P1: the values are present in subagent turns, which
+     stay blocked through `subagent_start` anyway.
+3. **Is there a public command catalog? No.**
+   - The registry (`hermes_cli.commands.COMMAND_REGISTRY`) is not in the public
+     plugin API. The bundled Discord adapter imports it as an internal.
+   - The API server has no command route.
+   - Public alternatives:
+     - The gateway's `/help` (filterable, `/help <text>`) and `/commands`
+       (paged, includes skills) reply with text through any platform. The
+       client renders that reply.
+     - Autocomplete uses a static list generated at build time from the
+       published slash-command reference, plus the client's own commands.
+   - File an upstream request for a public catalog function (name, args hint,
+     description, gateway availability).
+4. **What are the picker signatures and callbacks? Confirmed from the Discord
+   adapter and the call sites (`gateway/slash_commands_model.py`).**
+   - **Model picker:** `send_model_picker(chat_id, providers, current_model,
+     current_provider, session_key, on_model_selected, metadata=None) ->
+     SendResult`.
+     - `providers` comes from `list_picker_providers(max_models=50, …)`:
+       `[{slug, name, models, total_models, is_current}]`.
+     - The selection: `await on_model_selected(chat_id, model_id,
+       provider_slug)` returns the confirmation text to send. The gateway does
+       the switch and persists it for the session.
+     - Discord's 25-option limit is Discord's own; clients page or search.
+   - **Choice picker:** `send_choice_picker(chat_id, title, choices,
+     session_key, on_choice_selected, metadata=None)`.
+     - `choices` are `[{value, label, is_current}]`.
+     - The selection: `await on_choice_selected(chat_id, value)` returns text.
+   - Caveat: these two hooks are documented in the Hermes repo's
+     `gateway/platforms/ADDING_A_PLATFORM.md` ("Interactive UX"), not on the
+     docs site's signature table. Feature-detect and keep the text fallback.
+5. **Who may answer an approval? It is enforced by Hermes.**
+   - Approvals arrive as `ExecApprovalPrompt` (`chat_id`, `session_key`,
+     `text`, `command`, `description`, `smart_denied`, `request_id`, and
+     `actions` as `(label, choice, style)` with choice `once` / `session` /
+     `always` / `deny`).
+   - The adapter answers with the public `resolve_gateway_approval_card(
+     session_key, choice, request_id, actor_id=…, extra=…)`. It resolves only
+     that card's request, checks the answerer through `approval_refusal`
+     (requester or configured approvers), and keeps the request deny-only until
+     the card has shown the whole command.
+   - With the shared key the actor is always the owner. With M4 tokens it is
+     the client's user id, and Hermes enforces requester-only.
+   - The adapter adds its own rule: actions only for the client's own chat
+     ids (3.3).
 
 ## 6. Milestones
 
