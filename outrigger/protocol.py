@@ -1,0 +1,155 @@
+"""Wire messages and validation for the outrigger control channel."""
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+from typing import Any
+
+PROTOCOL_VERSION = 1
+POLICIES = ("auto", "confirm", "deny_when_unattended")
+_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,63}$")
+_CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+class ProtocolError(ValueError):
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+@dataclass
+class ToolDecl:
+    name: str
+    description: str = ""
+    parameters: dict = field(default_factory=lambda: {"type": "object", "properties": {}})
+    policy: str = "confirm"  # safe default: ask the human
+    timeout_s: int | None = None
+    max_result_chars: int | None = None
+
+    @classmethod
+    def parse(cls, raw: Any) -> "ToolDecl":
+        if not isinstance(raw, dict):
+            raise ProtocolError("bad_tool", "tool declaration must be an object")
+        name = raw.get("name")
+        if not isinstance(name, str) or not _NAME_RE.match(name):
+            raise ProtocolError("bad_tool", f"invalid tool name: {name!r}")
+        policy = raw.get("policy", "confirm")
+        if policy not in POLICIES:
+            raise ProtocolError("bad_tool", f"invalid policy for {name}: {policy!r}")
+        params = raw.get("parameters") or {"type": "object", "properties": {}}
+        if not isinstance(params, dict):
+            raise ProtocolError("bad_tool", f"parameters for {name} must be an object")
+        for key in ("timeout_s", "max_result_chars"):
+            v = raw.get(key)
+            if v is not None and (not isinstance(v, int) or isinstance(v, bool) or v <= 0):
+                raise ProtocolError("bad_tool", f"{key} for {name} must be a positive integer")
+        return cls(
+            name=name,
+            description=str(raw.get("description", ""))[:500],
+            parameters=params,
+            policy=policy,
+            timeout_s=raw.get("timeout_s"),
+            max_result_chars=raw.get("max_result_chars"),
+        )
+
+
+def parse_tools(raw: Any, limit: int = 64) -> dict[str, ToolDecl]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, list):
+        raise ProtocolError("bad_tool", "tools must be a list")
+    if len(raw) > limit:
+        raise ProtocolError("bad_tool", f"too many tools (max {limit})")
+    out: dict[str, ToolDecl] = {}
+    for item in raw:
+        decl = ToolDecl.parse(item)
+        out[decl.name] = decl
+    return out
+
+
+def validate_args(schema: dict, args: Any) -> str | None:
+    """Return an error string, or None if args satisfy the JSON Schema."""
+    try:
+        import jsonschema
+    except ImportError:
+        return _minimal_validate(schema, args)
+    try:
+        jsonschema.validate(args, schema)
+    except jsonschema.ValidationError as e:
+        return e.message
+    except jsonschema.SchemaError as e:
+        return f"tool declares an invalid schema: {e.message}"
+    return None
+
+
+_PY_TYPES = {
+    "string": (str,),
+    "integer": (int,),
+    "number": (int, float),
+    "boolean": (bool,),
+    "object": (dict,),
+    "array": (list,),
+    "null": (type(None),),
+}
+
+
+def _type_ok(value: Any, expected) -> bool:
+    names = expected if isinstance(expected, list) else [expected]
+    for name in names:
+        types = _PY_TYPES.get(name)
+        if types is None:
+            return True  # unknown type keyword: don't reject
+        if isinstance(value, bool) and name in ("integer", "number"):
+            continue
+        if isinstance(value, types):
+            return True
+    return False
+
+
+def _minimal_validate(schema: dict, args: Any, path: str = "args") -> str | None:
+    """Fallback when jsonschema is not installed: type, enum, required,
+    properties and additionalProperties: false, recursing into objects and arrays."""
+    if not isinstance(schema, dict):
+        return None
+    if "type" in schema and not _type_ok(args, schema["type"]):
+        return f"{path} must be of type {schema['type']}"
+    if "enum" in schema and args not in schema["enum"]:
+        return f"{path} must be one of {schema['enum']}"
+    if isinstance(args, dict):
+        for key in schema.get("required", []) or []:
+            if key not in args:
+                return f"missing required argument: {key}"
+        props = schema.get("properties", {}) or {}
+        if schema.get("additionalProperties") is False:
+            extra = sorted(set(args) - set(props))
+            if extra:
+                return f"unexpected argument(s): {', '.join(extra)}"
+        for key, sub in props.items():
+            if key in args:
+                err = _minimal_validate(sub, args[key], f"{path}.{key}")
+                if err:
+                    return err
+    if isinstance(args, list) and isinstance(schema.get("items"), dict):
+        for i, item in enumerate(args):
+            err = _minimal_validate(schema["items"], item, f"{path}[{i}]")
+            if err:
+                return err
+    return None
+
+
+_WS_RE = re.compile(r"\s+")
+
+
+def one_line(text: Any, limit: int) -> str:
+    """Single line, no control characters: safe to splice into model context."""
+    text = _CTRL_RE.sub(" ", str(text))
+    return _WS_RE.sub(" ", text).strip()[:limit]
+
+
+def sanitize_text(text: str, limit: int) -> tuple[str, bool]:
+    """Strip control characters and cap length. Returns (text, truncated)."""
+    text = _CTRL_RE.sub("", text)
+    if len(text) > limit:
+        return text[:limit], True
+    return text, False

@@ -1,0 +1,24 @@
+name: outrigger
+version: 0.1.0
+manifest_version: 2
+description: Let a thin client attach to a Hermes session and offer tools that run on the client.
+author: Autumn Thomson
+license: MIT
+provides_tools: [outrigger_call, outrigger_tools]
+provides_hooks: [pre_llm_call, on_session_end, subagent_start, subagent_stop]
+python_dependencies: ["jsonschema>=4,<5"]
+config_schema:
+  enabled_routes: {type: bool, default: true, description: "Mount /v1/outrigger/ws (gateway restart needed)"}
+  allow_remote: {type: bool, default: false, description: "Accept non-loopback clients (requires a key)"}
+  auth_token: {type: secret, default: "", description: "Bearer token for clients; falls back to API_SERVER_KEY"}
+  default_timeout_s: {type: int, default: 60, description: "Per-call timeout when the tool declares none"}
+  max_timeout_s: {type: int, default: 400, description: "Cap on tool-declared timeouts (Hermes abandons calls at 420s)"}
+  max_result_chars: {type: int, default: 20000, description: "Result size cap"}
+  max_calls_per_turn: {type: int, default: 20, description: "Per client, per turn"}
+  context_max_chars: {type: int, default: 4500, description: "Cap on the per-turn attached-clients context"}
+  audit_args: {type: bool, default: false, description: "Write argument bodies to the audit log"}
+  allow_subagents: {type: bool, default: false, description: "Let delegated subagents call attached clients"}
+  review: {type: str, default: "smart", description: "smart: an LLM reviews calls that need approval (deny blocks; approve lets the client skip asking). off: no review"}
+  review_timeout_s: {type: int, default: 30, description: "Reviewer call timeout"}
+  review_deny: {type: str, default: "ask", description: "ask: a reviewer deny is shown to the user as a flagged prompt they can override; block: a deny is final"}
+  review_policy: {type: str, default: "", description: "Extra rules appended to the reviewer's instructions"}
