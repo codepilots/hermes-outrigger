@@ -1,7 +1,7 @@
 # Notebook mode: edit a note on the Hermes host, with `//` commands
 
-Date: 2026-11-17. Status: **N1 and N2 implemented** (2026-11-17,
-`outrigger/notebook.py`, sidebar `notebook.js`); N3-N4 proposed. Builds on the Outrigger platform
+Date: 2026-11-17. Status: **N1-N3 implemented** (2026-11-17,
+`outrigger/notebook.py`, sidebar `notebook.js` and `notebook.html`); N4 proposed. Builds on the Outrigger platform
 (docs/platform.md) and the browser sidebar.
 
 Decided (2026-11-17):
@@ -202,6 +202,25 @@ editor is locked), but the composer can still send ordinary chat or `/stop`.
   afterwards), `//correct my spelling` was sent. The note locked, Hermes
   corrected all four mistakes through `notebook_read` / `notebook_edit` and left
   other text alone, and the editor unlocked with the change highlighted.
+
+## 8b. As built (N3)
+
+- **Preview** toggles the editor with the rendered note, using the sidebar's
+  sanitized Markdown pipeline. It stays live while open.
+- **Selection commands.** Select text, then press Ctrl+/ or "Ask about selection".
+  A one-line prompt shows the line range, and the client sends
+  `doc.command {selection: {from_line, to_line}, instruction}` with no `//`
+  line. The plugin snapshots and locks as usual but removes nothing, and tells
+  Hermes "selected lines X-Y and gave an instruction about them". What to do is
+  still Hermes's call.
+- **Full-tab editor.** `notebook.html` is opened from "Open in tab". It runs the
+  same Notebook code on its own outrigger connection (`hermes-notebook-<id>`, no
+  browser tools), so the panel and the tab both follow the note through
+  `doc.changed`. Prompts during a command render in whichever view started it.
+  The prompt-card code moved to a shared `prompts.js` for this.
+- **Live check, 2026-11-17:** selecting one line of a scratch note and asking
+  "translate into French": Hermes translated only that line, and the editor
+  locked and unlocked with the summary and highlight.
 
 ## 9. Milestones
 

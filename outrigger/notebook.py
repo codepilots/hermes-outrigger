@@ -293,27 +293,39 @@ def note_chat_id(doc: Doc) -> str:
     return "note-" + hashlib.sha256(doc.doc_id.encode()).hexdigest()[:16]
 
 
-def start_command(doc: Doc, client, base_version: str, line: int, instruction: str) -> dict:
-    """Remove the // line, snapshot, lock. The caller then starts the Hermes turn."""
+def start_command(doc: Doc, client, base_version: str, line: int | None, instruction: str,
+                  selection: tuple[int, int] | None = None) -> dict:
+    """Remove the // line (inline command) or keep the text (a command on a selection),
+    snapshot, lock. The caller then starts the Hermes turn."""
     instruction = (instruction or "").strip()
     if not instruction:
         raise NotebookError("bad_command", "empty instruction")
+    if (line is None) == (selection is None):
+        raise NotebookError("bad_command", "give either the // line or a selection")
     with doc.mutex:
         if doc.lock:
             raise NotebookError("locked", "Hermes is already working on this note")
         _check_disk(doc)
         if base_version != doc.version:
             raise NotebookError("conflict", "the note changed; merge first")
+        if selection is not None:
+            n = len(doc.text.split("\n"))
+            a, b = selection
+            if not (1 <= a <= b <= n):
+                raise NotebookError("bad_selection", f"selection {a}-{b} outside 1-{n}")
         sid = snapshot(doc)
-        _write(doc, _strip_command_line(doc.text, line, instruction))
+        if line is not None:
+            _write(doc, _strip_command_line(doc.text, line, instruction))
         doc.lock = {"by": "hermes", "instruction": instruction[:300], "snapshot": sid, "line": line,
-                    "started": int(time.time()), "client": client, "session_id": None, "chat_key": None}
+                    "selection": selection, "started": int(time.time()), "client": client,
+                    "session_id": None, "chat_key": None}
     return doc.lock
 
 
-def command_message(doc: Doc, line: int, instruction: str) -> str:
-    return (f"The user is editing the note `{doc.doc_id}` and wrote an inline instruction at line {line} "
-            f"(the line has been removed): \"{instruction}\".\n"
+def command_message(doc: Doc, line: int | None, instruction: str, selection: tuple[int, int] | None = None) -> str:
+    where = (f"selected lines {selection[0]}-{selection[1]} and gave an instruction about them"
+             if selection else f"wrote an inline instruction at line {line} (the line has been removed)")
+    return (f"The user is editing the note `{doc.doc_id}`, {where}: \"{instruction}\".\n"
             "Decide from the instruction, where it was written and the note itself what it applies to. "
             "Use the notebook_read and notebook_edit tools (via tool_call if they are not directly "
             "available) to change this note; keep the user's voice and Markdown. Then reply with one "

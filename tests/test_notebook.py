@@ -194,3 +194,22 @@ def test_subagents_cannot_edit(vault):
     from outrigger.registry import REGISTRY
     REGISTRY.mark_subagent("child")
     assert json.loads(notebook.tool_read({}, session_id="child"))["error"] == "subagent"
+
+
+async def test_command_on_a_selection(aiohttp_client, vault, adapter):
+    await adapter.connect()
+    c = await start(aiohttp_client)
+    w = await nb_client(c)
+    await w.send_json({"type": "doc.open", "root": "notes", "path": "Projects/Garden.md"})
+    doc = await next_of(w, "doc.content")
+    await w.send_json({"type": "doc.command", "doc_id": doc["doc_id"], "base_version": doc["version"],
+                       "selection": {"from_line": 3, "to_line": 3}, "instruction": "make this funnier"})
+    lock = await next_of(w, "doc.lock")
+    after = await next_of(w, "doc.content")
+    assert lock["locked"] and after["text"] == doc["text"]          # nothing removed
+    await asyncio.sleep(0.05)
+    assert "selected lines 3-3" in HANDLED[-1].text and "make this funnier" in HANDLED[-1].text
+    notebook.end_command(notebook.DOCS[doc["doc_id"]])
+    await w.send_json({"type": "doc.command", "doc_id": doc["doc_id"], "base_version": doc["version"],
+                       "selection": {"from_line": 2, "to_line": 99}, "instruction": "x"})
+    assert (await next_of(w, "doc.error"))["code"] == "bad_selection"

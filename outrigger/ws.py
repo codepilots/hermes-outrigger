@@ -311,8 +311,16 @@ async def _handle_doc(client: Client, t: str, m: dict, ws) -> None:
                 raise notebook.NotebookError("platform_unavailable", "// commands need the Outrigger platform")
             if "chat" not in client.capabilities:
                 raise notebook.NotebookError("no_chat", "// commands need the 'chat' capability")
-            line, instruction = int(m.get("line") or 0), str(m.get("instruction") or "")
-            lock = notebook.start_command(doc, client, str(m.get("base_version")), line, instruction)
+            instruction = str(m.get("instruction") or "")
+            sel = m.get("selection")
+            selection = None
+            if isinstance(sel, dict):
+                try:
+                    selection = (int(sel["from_line"]), int(sel["to_line"]))
+                except (KeyError, TypeError, ValueError):
+                    raise notebook.NotebookError("bad_selection", "selection: {from_line, to_line}")
+            line = None if selection else int(m.get("line") or 0)
+            lock = notebook.start_command(doc, client, str(m.get("base_version")), line, instruction, selection)
             local = notebook.note_chat_id(doc)
             key = platform.chat_key(client, local)
             lock["chat_key"] = key
@@ -322,7 +330,7 @@ async def _handle_doc(client: Client, t: str, m: dict, ws) -> None:
                                      "chat_id": local})
             notebook.broadcast(doc, notebook.content_frame(doc, by="command"))
             try:
-                await platform.inbound(client, local, notebook.command_message(doc, line, lock["instruction"]),
+                await platform.inbound(client, local, notebook.command_message(doc, line, lock["instruction"], selection),
                                        "ndoc_" + __import__("secrets").token_hex(5))
             except Exception as e:
                 notebook.end_command(doc, notice=f"could not start Hermes: {e}")
