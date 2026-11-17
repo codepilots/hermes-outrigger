@@ -3,6 +3,12 @@
 Date: 2026-11-17. Status: proposal. Builds on the Outrigger platform
 (docs/platform.md) and the browser sidebar.
 
+Decided (2026-11-17):
+- **A full editor.** CodeMirror 6 from N1, not a textarea first.
+- **Scope is Hermes's call.** What "this" means in a `//` command is for Hermes
+  to interpret from the instruction, where it was typed and the note itself. The
+  plugin imposes no default target.
+
 ## 1. What the user gets
 
 - **Open and edit.** Open a Markdown file that lives on the machine Hermes runs
@@ -17,8 +23,8 @@ Date: 2026-11-17. Status: proposal. Builds on the Outrigger platform
   ```
 
   Pressing Enter on that line sends it. Hermes removes the line from the note,
-  does the work (fixes the paragraph, fleshes out a section, finds and adds
-  relevant links) and the result appears in the editor.
+  works out what the instruction refers to (the sentence above, a section, the
+  whole note), does the work, and the result appears in the editor.
 - **Editing pauses while Hermes works,** so nobody types over its changes. The
   editor is read-only with a "Hermes is working on: correct my spelling…" bar and
   a Stop button. It unlocks when Hermes finishes, showing what changed and an
@@ -104,10 +110,14 @@ client can never overwrite newer text.
    platform, as the user who typed it:
 
    > The user is editing the note `notes:Projects/Garden.md` and wrote an inline
-   > instruction at line 42: "correct my spelling". Unless it says otherwise, it
-   > applies to the paragraph or section just above line 42. Use notebook_read and
-   > notebook_edit to change the note, keep the user's voice and Markdown, then
-   > reply with one short line saying what you changed.
+   > instruction at line 42 (the line has been removed): "correct my spelling".
+   > Decide from the instruction, where it was written and the note itself what it
+   > applies to. Use notebook_read and notebook_edit to change the note, keep the
+   > user's voice and Markdown, then reply with one short line saying what you
+   > changed.
+
+   The message carries the instruction and its position, nothing else. Hermes
+   reads what it needs with `notebook_read`.
 
 4. **Hermes does the work.**
    - **`notebook_read {from_line?, to_line?}`** returns numbered lines and the
@@ -134,7 +144,8 @@ editor is locked), but the composer can still send ordinary chat or `/stop`.
 - **Opening a note.** "Open note…" shows a searchable list from `doc.list`;
   recent notes are pinned. A command (`/note Garden`) does the same. The panel
   switches to a **Note** view, with a tab back to Chat.
-- **The editor.** CodeMirror 6, vendored, with Markdown highlighting. `//` lines
+- **The editor.** CodeMirror 6 (decided), vendored and bundled by a `tools/`
+  build script like the Arcjet bundle, with Markdown highlighting. `//` lines
   are styled as commands (accent colour and a "↵ send to Hermes" hint), and a
   live preview toggle uses the existing Markdown renderer.
 - **Status bar.** Shows Saved, Saving…, Conflict, or "Hermes is working…" with a
@@ -159,24 +170,23 @@ editor is locked), but the composer can still send ordinary chat or `/stop`.
 3. **Merging.** Choose a 3-way merge for disk changes: diff-match-patch (small,
    vendorable) or line-based diff3. It must behave sensibly with Obsidian's sync
    writing whole files.
-4. **CodeMirror size.** A minimal Markdown build is ~150-200 KB, bundled like the
-   Arcjet bundle (`tools/` build script). Alternatively, start with a styled
-   textarea and upgrade later.
-5. **Scope of "this".** Paragraph above, section above, or the whole note? Start
-   with "the paragraph or section above, unless the instruction says otherwise",
-   and see how often users need a selection-based variant (select text, then
-   `//`, so the selection is the target).
+4. **Editor: decided, CodeMirror 6.** Pin versions at least two weeks old, bundle
+   only the Markdown language and the basic setup (about 150-200 KB), and check
+   that the bundle uses no `eval` (the extension's script policy forbids it).
+5. **Scope of "this": decided, Hermes interprets it.** No default target. A
+   later selection-based variant (select text, then `//`) would just add "the
+   user had selected lines X-Y" to the message, still for Hermes to weigh.
 
 ## 8. Milestones
 
 - **N1, files:** roots, `doc.list/open/update/close`, versions, atomic writes,
-  watcher with `doc.changed`, conflict bar. Sidebar Note view with a textarea
+  watcher with `doc.changed`, conflict bar. Sidebar Note view with the CodeMirror
   editor and autosave.
 - **N2, commands:** `doc.command`, lock, snapshots, note chats on the platform,
   `notebook_read` / `notebook_edit`, unlock on turn end, summary, diff highlight
   and undo.
-- **N3, editor:** CodeMirror with `//` styling and preview, full-tab editor, and
-  selection-targeted commands.
+- **N3, editor:** `//` line styling and the preview toggle, the full-tab editor,
+  and passing a selection along with a command.
 - **N4, sharing:** per-user roots for paired tokens, and several clients on one
   note (presence, lock shown to everyone).
 
