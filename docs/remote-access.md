@@ -8,11 +8,12 @@ Date: 2026-11-17. Applies to hermes-outrigger with `allow_remote` /
 
 ## The short version
 
-1. Expose **only** `/v1/outrigger/ws` through the tunnel (ingress `path` rule).
-2. Turn on `allow_remote` in the plugin settings.
-3. Pair a token for every remote device (`hermes outrigger pair`), `--admin` for
-   your own devices. Never put `API_SERVER_KEY` on a remote device.
-4. Optionally put Cloudflare Access and a rate-limit rule in front.
+1. Create a Cloudflare Tunnel that exposes **only** `/v1/outrigger/ws`
+   (steps 1-3).
+2. Turn on `allow_remote` in the plugin settings (step 4).
+3. Pair a token for every remote device, with `--admin` for your own devices
+   (step 5). Never put `API_SERVER_KEY` on a remote device.
+4. Check from outside, then add a rate-limit rule (steps 7-8).
 
 ## Why this setup
 
@@ -35,13 +36,39 @@ through the tunnel counts as remote:
 | Paired token (`otr_…`) | allowed | allowed if `allow_remote` |
 | Revoked or unknown token | refused (401) | refused (401) |
 
-## 1. Tunnel config: only the plugin's route
+## Before you start
+
+- **Prerequisite:** a domain whose DNS is on Cloudflare (free plan is fine).
+  Below, `hermes.example.com` stands for the hostname you pick.
+- **Cloudflare can read your traffic.** It terminates TLS at its edge, so it
+  can technically see what passes through: your chats, and page and note
+  contents. If that's unacceptable, use a private network such as Tailscale
+  or WireGuard instead. That way there's no third party and nothing is
+  exposed publicly.
+- **Keep the gateway on loopback.** Leave it listening on 127.0.0.1 (the
+  default) and don't set `API_SERVER_HOST`. The tunnel is the only way in.
+
+## 1. Install cloudflared and create the tunnel
+
+On the Hermes machine:
+
+```sh
+sudo pacman -S cloudflared                      # Arch (extra); other distros: Cloudflare's packages
+cloudflared tunnel login                        # opens a browser; pick the domain. Writes ~/.cloudflared/cert.pem
+cloudflared tunnel create hermes                # prints the tunnel ID; writes ~/.cloudflared/<ID>.json
+cloudflared tunnel route dns hermes hermes.example.com   # creates the DNS record for the tunnel
+```
+
+Both `cert.pem` and `<ID>.json` are credentials: keep them private, and out of
+backups that leave the machine.
+
+## 2. Tunnel config: only the plugin's route
 
 `~/.cloudflared/config.yml`:
 
 ```yaml
-tunnel: <your-tunnel-id>
-credentials-file: /home/<you>/.cloudflared/<your-tunnel-id>.json
+tunnel: <ID>
+credentials-file: /home/<you>/.cloudflared/<ID>.json
 ingress:
   - hostname: hermes.example.com
     path: ^/v1/outrigger/ws$
@@ -49,10 +76,46 @@ ingress:
   - service: http_status:404
 ```
 
-Leave the gateway listening on 127.0.0.1 (the default). Don't change
-`API_SERVER_HOST`.
+The first rule sends only the WebSocket path to Hermes. The catch-all answers
+404 for everything else, including `/health`, `/v1/models` and
+`/v1/chat/completions`.
 
-## 2. Plugin settings
+Check the rules before going live:
+
+```sh
+cloudflared tunnel ingress validate
+cloudflared tunnel ingress rule https://hermes.example.com/v1/outrigger/ws   # → rule 0 (Hermes)
+cloudflared tunnel ingress rule https://hermes.example.com/v1/models         # → rule 1 (404)
+```
+
+## 3. Run the tunnel as a service
+
+A user service, next to `hermes-gateway`.
+`~/.config/systemd/user/cloudflared-hermes.service`:
+
+```ini
+[Unit]
+Description=Cloudflare Tunnel for the Hermes outrigger plugin
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/cloudflared tunnel --config %h/.cloudflared/config.yml run hermes
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+```
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now cloudflared-hermes
+loginctl enable-linger "$USER"     # keep user services running while logged out
+journalctl --user -u cloudflared-hermes -f   # should show "Registered tunnel connection" (x4)
+```
+
+## 4. Plugin settings
 
 `~/.hermes/config.yaml`:
 
@@ -69,19 +132,21 @@ plugins:
         # max_chat_chars: 100000
 ```
 
-Restart the gateway: `systemctl --user restart hermes-gateway`.
+Then `systemctl --user restart hermes-gateway`.
 
-## 3. Tokens for remote devices
+## 5. Tokens for remote devices
+
+One token per device, so each can be revoked on its own:
 
 ```sh
-hermes outrigger pair --user me-laptop --label "work laptop" --admin   # you
-hermes outrigger pair --user ann --name Ann --label "Ann's laptop"   # someone else
+hermes outrigger pair --user me-laptop --label "work laptop" --admin   # you, on another device
+hermes outrigger pair --user ann --name Ann --label "Ann's laptop"     # someone else
 hermes outrigger tokens                # list (never shows secrets)
 hermes outrigger revoke <token-id>     # takes effect within ~20 s
 ```
 
-In the sidebar's settings, set the address to `https://hermes.example.com` and
-paste the token. "Test connection" checks the WebSocket.
+The token is shown once. Copy it straight into the device. Don't keep it in
+chat history or notes.
 
 What a token gets:
 
@@ -98,22 +163,84 @@ What a token gets:
   - They are limited to `max_clients_per_token` connections and
     `user_messages_per_min` messages.
   - Hermes's own `/resume` and `/sessions` show only their own chats.
+  - They see your Hermes user profile (see Known limits).
 - The user id `owner` (`platform_owner_id`) is reserved; pairing refuses it.
 
-Your own devices on the Hermes machine can keep using the API key.
+Your own devices on the Hermes machine can keep using the API key at
+`http://127.0.0.1:8642`.
 
-## 4. Optional: Cloudflare Access and rate limiting
+## 6. Set up the remote device
 
-- **Access application** for `hermes.example.com` adds a login before
-  anything reaches the gateway. Browsers can't add custom headers to a
-  WebSocket, so Access service tokens won't work for the sidebar. A
-  browser login (the `CF_Authorization` cookie) or mTLS client certificates
-  can. Untested with the extension: if the cookie isn't sent on the
-  extension's WebSocket, use mTLS, or rely on tokens alone (they carry about
-  190 bits of randomness and are checked before the WebSocket opens).
-- **Rate-limiting rule** on the path (for example 30 requests a minute per
-  IP) cuts noise from scanners. The plugin itself doesn't limit failed
-  logins.
+1. Install the Hermes Sidebar extension.
+2. Open its settings → Connection.
+3. Set the gateway address to `https://hermes.example.com` (no path) and
+   paste the token.
+4. Click **Test connection**: it should say "Connected with token ✓".
+
+The sidebar switches to `wss://` itself.
+
+## 7. Check from outside
+
+From another network (a phone hotspot, say):
+
+```sh
+curl -i https://hermes.example.com/health              # 404: the rest of the gateway isn't reachable
+curl -i https://hermes.example.com/v1/models           # 404
+curl -i https://hermes.example.com/v1/outrigger/ws     # 401 or 403 without a token: the plugin answered
+```
+
+On the Hermes machine, the gateway log shows each remote connection with the
+address Cloudflare reports:
+
+```sh
+journalctl --user -u hermes-gateway | grep outrigger
+```
+
+## 8. Cloudflare dashboard (recommended)
+
+- **Rate limiting.** Security → WAF → Rate limiting rules → create a rule:
+  - When: URI Path equals `/v1/outrigger/ws`.
+  - Rate: 30 requests per 1 minute, counted per IP.
+  - Action: Block for 10 minutes.
+
+  A normal sidebar opens one connection and keeps it, so this only affects
+  scanners and runaway reconnect loops. The plugin itself doesn't limit failed
+  logins, but guessing a token isn't feasible (about 190 bits).
+- **Cloudflare Access (optional, untested with the extension).** An Access
+  application for `hermes.example.com` adds a login before anything reaches
+  the gateway.
+  - Browsers can't add custom headers to a WebSocket, so Access service
+    tokens won't work for the sidebar.
+  - A browser login (the `CF_Authorization` cookie) or an mTLS client
+    certificate can work, but whether the extension's WebSocket sends the
+    cookie hasn't been tested.
+  - Try it with one device first. If the connection is refused, use mTLS or
+    rely on tokens alone.
+- **SSL/TLS:** the tunnel is encrypted end to end to the edge, so no
+  certificate setup is needed. Leave "Always Use HTTPS" on.
+
+## Troubleshooting
+
+| Symptom | Likely cause |
+|---|---|
+| Test connection: "Refused or unreachable" | `allow_remote` not set or gateway not restarted. The gateway log says `refused remote client … (allow_remote is off)` |
+| Same, with the API key | By design. Use a paired token (`owner_key_remote` is off) |
+| `curl …/v1/outrigger/ws` times out or returns 502 | Tunnel down (`systemctl --user status cloudflared-hermes`) or the gateway isn't running |
+| Works, then drops after a gateway restart | The sidebar reconnects by itself within a few seconds; routes mount only at gateway start |
+| "Token accepted, but the Outrigger platform is off" | The plugin's `platform` setting is off; remote chat needs it |
+| `too_many_clients` | That token already has `max_clients_per_token` connections; close old tabs or windows |
+
+## Turning remote access off
+
+- **One device:** `hermes outrigger revoke <token-id>`. Its connections close
+  within about 20 s.
+- **Everything, quickly:** `systemctl --user stop cloudflared-hermes`, or set
+  `allow_remote: false` and restart the gateway.
+- **For good:**
+  1. `systemctl --user disable --now cloudflared-hermes`.
+  2. `cloudflared tunnel delete hermes`.
+  3. Delete the DNS record in the Cloudflare dashboard.
+  4. Remove `~/.cloudflared/<ID>.json`.
 
 ## Verified live (2026-11-17)
 
