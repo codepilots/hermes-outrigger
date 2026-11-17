@@ -15,7 +15,7 @@ config_schema:
   max_timeout_s: {type: int, default: 400, description: "Cap on tool-declared timeouts (Hermes abandons calls at 420s)"}
   max_result_chars: {type: int, default: 20000, description: "Result size cap"}
   max_calls_per_turn: {type: int, default: 20, description: "Per client, per turn"}
-  context_max_chars: {type: int, default: 4500, description: "Cap on the per-turn attached-clients context"}
+  context_max_chars: {type: int, default: 6000, description: "Cap on the per-turn attached-clients context"}
   audit_args: {type: bool, default: false, description: "Write argument bodies to the audit log"}
   allow_subagents: {type: bool, default: false, description: "Let delegated subagents call attached clients"}
   review: {type: str, default: "smart", description: "smart: an LLM reviews calls that need approval (deny blocks; approve lets the client skip asking). off: no review"}

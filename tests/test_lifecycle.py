@@ -361,7 +361,7 @@ async def test_context_for_sidebar_fits_budget_and_explains_bridge(aiohttp_clien
     text = context.build("S1", None, settings.get("context_max_chars"))
     assert "tool_call{calls" in text and all(t["name"] in text for t in tools)
     assert "snapshot(" in text and "refs like e14" in text, "full signatures fit, not the names-only fallback"
-    assert all(t["description"][:40] in text for t in tools)
+    assert all(t["description"][:25] in text for t in tools)
     assert "⟦EMAIL_1⟧" in text and len(text) < settings.get("context_max_chars") - 500, "headroom for long titles"
 
 

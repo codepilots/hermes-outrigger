@@ -9,7 +9,7 @@ DEFAULTS = {
     "max_timeout_s": 400,  # Hermes abandons tool calls at 420s
     "max_result_chars": 20000,
     "max_calls_per_turn": 20,
-    "context_max_chars": 4500,
+    "context_max_chars": 6000,
     "audit_args": False,
     "allow_subagents": False,
     "review": "smart",  # smart: LLM reviewer for non-auto calls; off: none

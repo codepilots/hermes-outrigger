@@ -1,6 +1,8 @@
 """pre_llm_call context block listing attached clients and their tools."""
 from __future__ import annotations
 
+import re
+
 from . import settings
 from .protocol import one_line
 from .registry import REGISTRY
@@ -30,6 +32,16 @@ REDACTION = (
 
 _TYPES = {"string": "string", "integer": "int", "number": "number", "boolean": "bool",
           "object": "object", "array": "array"}
+
+
+def _short(description: str, limit: int = 100) -> str:
+    """First sentence (or clause), at most `limit` chars: full schemas are in outrigger_tools."""
+    text = one_line((description or "").split("\n")[0], 400)
+    m = re.search(r"[.;:](?= [A-Z(])", text[:limit + 1])  # not inside "e.g. x" / "incl. y"
+    if m:
+        text = text[:m.start()]
+    text = text.rstrip(" .;:")
+    return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
 
 
 def _sig(decl) -> str:
@@ -62,8 +74,8 @@ def build(session_id, conversation_id, max_chars: int) -> str | None:
             head += f"; {c.summary}"
         lines.append(head)
         for t in c.tools.values():
-            desc = one_line((t.description or "").split("\n")[0], 160)
-            lines.append(f"  - {_sig(t)} - {desc}; {t.policy}")
+            desc = _short(t.description)
+            lines.append(f"  - {_sig(t)} - {desc} ({t.policy})")
     if any(c.redaction for c in clients):
         lines.append(REDACTION)
     lines.append(USAGE)

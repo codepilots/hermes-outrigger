@@ -209,3 +209,20 @@ async def test_hot_reload_into_frozen_router_does_not_raise():
     app = web.Application()
     app.router.freeze()
     ctx.platforms["api_server"](app, object())  # logs a warning instead of raising
+
+
+async def test_image_results_are_saved_for_vision_analyze(aiohttp_client, tmp_path):
+    import base64
+    png = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")
+    c = await start(aiohttp_client)
+    ws, _ = await connect(c)
+    asyncio.create_task(serve_one(ws, lambda m: {"ok": True, "content": {
+        "url": "https://x.test/", "image": {"mime": "image/png", "data": base64.b64encode(png).decode()}}}))
+    out = await call({"tool": "big", "args": {}})
+    body = json.loads(out["content"])
+    assert "image" not in body and body["url"] == "https://x.test/" and "vision_analyze" in body["hint"]
+    from pathlib import Path
+    p = Path(body["image_path"])
+    assert p.read_bytes() == png and p.parent == tmp_path / "plugin-data/outrigger/captures"
+    asyncio.create_task(serve_one(ws, lambda m: {"ok": True, "content": {"image": {"mime": "text/html", "data": "PGgxPg=="}}}))
+    assert "image_error" in json.loads((await call({"tool": "big", "args": {}}))["content"])

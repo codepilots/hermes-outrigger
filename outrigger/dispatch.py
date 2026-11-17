@@ -178,7 +178,44 @@ def _run(client: Client, sid: str, decl, tool: str, call_args: dict, timeout: fl
     return "cancelled" if code == "outrigger_cancelled" else "error", _err(code, str(msg.get("message", "")))
 
 
+CAPTURE_TYPES = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}
+MAX_CAPTURE_BYTES = 8 * 1024 * 1024
+KEEP_CAPTURES = 20
+
+
+def _save_capture(image) -> dict:
+    """A client tool returned an image ({mime, data: base64}). A plugin tool's result is text
+    to the model, so the image is saved as a file and Hermes is told to open it with its
+    vision_analyze tool (which shows it natively on vision-capable models, else describes it)."""
+    import base64
+    import os
+    import secrets
+    import time
+    from pathlib import Path
+    mime = str(image.get("mime", "")).lower() if isinstance(image, dict) else ""
+    ext = CAPTURE_TYPES.get(mime)
+    if not ext or not isinstance(image.get("data"), str):
+        return {"image_error": "unsupported image (png, jpeg or webp, base64)"}
+    try:
+        raw = base64.b64decode(image["data"], validate=True)
+    except Exception:
+        return {"image_error": "invalid base64"}
+    if len(raw) > MAX_CAPTURE_BYTES:
+        return {"image_error": f"image larger than {MAX_CAPTURE_BYTES // (1024 * 1024)} MB"}
+    home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
+    folder = home / "plugin-data" / "outrigger" / "captures"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(3)}{ext}"
+    path.write_bytes(raw)
+    for old in sorted(folder.iterdir(), key=lambda p: p.stat().st_mtime)[:-KEEP_CAPTURES]:
+        old.unlink(missing_ok=True)
+    return {"image_path": str(path), "bytes": len(raw),
+            "hint": "Open it with vision_analyze (image_url = image_path) to look at it."}
+
+
 def _format_ok(content, decl) -> str:
+    if isinstance(content, dict) and "image" in content:
+        content = {**{k: v for k, v in content.items() if k != "image"}, **_save_capture(content["image"])}
     if not isinstance(content, str):
         content = json.dumps(content, default=str)
     limit = min(decl.max_result_chars or settings.get("max_result_chars"),

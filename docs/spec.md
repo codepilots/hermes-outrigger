@@ -142,7 +142,7 @@ Call these with outrigger_call{client, tool, args}.
 
 Schemas are rendered compactly (name, params, one-line description, policy).
 Full JSON Schemas are validated by the plugin, not shown in full, to keep tokens
-low. Cap: 4,500 characters per turn; beyond that, list names and point at
+low. Cap: 6,000 characters per turn; beyond that, list names and point at
 `outrigger_tools`.
 
 ### 6.3 Dispatch
@@ -296,7 +296,7 @@ refused before reaching a client), duration. It lives at
 | `max_timeout_s` | int | 400 | cap on client-declared timeout (Hermes abandons tool calls at 420 s) |
 | `max_result_chars` | int | 20000 | per result |
 | `max_calls_per_turn` | int | 20 | per client |
-| `context_max_chars` | int | 4500 | 6.2 cap (fits the sidebar's 13 tools and the redaction note in full) |
+| `context_max_chars` | int | 6000 | 6.2 cap (fits the sidebar's 20 tools, one-clause descriptions, and the redaction note) |
 | `audit_args` | bool | false | log argument bodies |
 | `allow_subagents` | bool | false | let delegated subagents call clients |
 | `auth_token` | str | "" | bearer token; falls back to `API_SERVER_KEY` env. With neither, only loopback peers may attach |
