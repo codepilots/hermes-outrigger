@@ -43,7 +43,8 @@ class Client:
     tools: dict[str, ToolDecl] = field(default_factory=dict)
     summary: str = ""
     concurrency: int = 1
-    redaction: dict | None = None  # {"enabled": True, "categories": [...]} when the client redacts
+    redaction: dict | None = None
+    capabilities: set = field(default_factory=set)  # hello.capabilities, e.g. {"chat"}  # {"enabled": True, "categories": [...]} when the client redacts
     pending: dict[str, Pending] = field(default_factory=dict)
     connected_at: float = field(default_factory=time.time)
     closed: bool = False
@@ -138,6 +139,12 @@ class Registry:
         with self._lock:
             client.session_id = session_id
             client.sessions = {session_id}
+
+    def bind_extra(self, client: Client, session_id: str) -> None:
+        """Also serve this session id (Outrigger platform chats), keeping existing bindings."""
+        with self._lock:
+            if not client.closed:
+                client.sessions.add(session_id)
 
     def rotate(self, old_session_id: str, new_session_id: str) -> None:
         """A rotating compression moved the conversation to a new session id."""

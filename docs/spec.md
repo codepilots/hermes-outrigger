@@ -171,11 +171,14 @@ Client to server:
 
 | type | fields | meaning |
 |---|---|---|
-| `hello` | `protocol: 1`, `client: {name, version, kind, label, concurrency?}`, `session_id?`, `tools: [ToolDecl]`, `redaction?: {enabled, categories}` | register; bind to session if given. `concurrency` 1..8, default 1. `redaction` says the client replaces personal data with `⟦TYPE_n⟧` placeholders; the context block then tells the model how to use them and the client's `reveal` tool |
+| `hello` | `protocol: 1\|2`, `capabilities?: ["chat", …]`, `client: {name, version, kind, label, concurrency?}`, `session_id?`, `tools: [ToolDecl]`, `redaction?: {enabled, categories}` | register; bind to session if given. `concurrency` 1..8, default 1. `redaction` says the client replaces personal data with `⟦TYPE_n⟧` placeholders; the context block then tells the model how to use them and the client's `reveal` tool |
 | `bind` | `session_id` | (re)bind to a session, e.g. after the first chat reply returns its id |
 | `tools.update` | `tools: [ToolDecl]` | replace tool list (e.g. tab changed) |
 | `context.update` | `summary: string` | short live context shown in 6.2 (current tab, open file) |
 | `result` | `call_id`, `ok: bool`, `content` (string or JSON), `error?` | answer a call |
+| `chat.send` | `chat_id`, `text`, `client_msg_id?` | protocol 2, `chat` capability: a message (or slash command) to the Outrigger platform; see docs/platform.md |
+| `chat.attach` | `chat_id` | route a chat to this client and deliver its outbox (after a reconnect; `home` is the platform's shared home chat) |
+| `chat.stop` | `chat_id` | `/stop` for a chat this client owns |
 | `progress` | `call_id`, `message` | optional; sent to the session's viewers as event `plugin.outrigger.progress` via `ctx.emit_to_session`, and the last one is included in a timeout error |
 | `pong` | | keepalive reply |
 
@@ -183,7 +186,8 @@ Server to client:
 
 | type | fields | meaning |
 |---|---|---|
-| `welcome` | `client_id`, `session_id?`, `limits` | accepted |
+| `welcome` | `client_id`, `session_id?`, `limits`, `platform?` | accepted; `platform: {name, available}` when the client declared `chat` |
+| `chat.accepted` / `chat.message` / `chat.edit` / `chat.typing` | `chat_id`, … | Outrigger platform frames (docs/platform.md) |
 | `call` | `call_id`, `tool`, `args`, `deadline_ms`, `turn_id` | run a tool |
 | `cancel` | `call_id`, `reason` | turn interrupted or timed out |
 | `ping` | | keepalive (every 20 s; drop after 2 misses) |
@@ -321,4 +325,4 @@ no middleware.
 - M4: per-client pairing tokens; second client (see scenarios).
 - M5: Outrigger platform: clients become a Hermes messaging platform (slash
   commands, `/model` picker, approvals, clarify) over the same WebSocket. See
-  docs/platform.md (proposal).
+  docs/platform.md. P1 (chat, slash commands as text) done 2026-11-17; P2-P4 next.

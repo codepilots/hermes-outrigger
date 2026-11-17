@@ -46,8 +46,11 @@ def _sig(decl) -> str:
 
 
 def build(session_id, conversation_id, max_chars: int) -> str | None:
-    clients = REGISTRY.for_session(session_id, conversation_id,
-                                   allow_subagent=bool(settings.get("allow_subagents")))
+    from .dispatch import platform_chat_clients
+    clients = platform_chat_clients(session_id)
+    if clients is None:
+        clients = REGISTRY.for_session(session_id, conversation_id,
+                                       allow_subagent=bool(settings.get("allow_subagents")))
     if not clients:
         return None
     lines = ["[Attached outriggers]"]

@@ -1,6 +1,7 @@
-# Outrigger platform: a messaging platform for outrigger clients (proposal)
+# Outrigger platform: a messaging platform for outrigger clients
 
-Date: 2026-11-16. Status: proposal; open questions answered against the Hermes
+Date: 2026-11-16. Status: **P1 implemented** (2026-11-17, `outrigger/platform.py`;
+sidebar uses it); P2-P4 proposed. Open questions answered against the Hermes
 v0.23.1 source (section 5). Extends spec.md (protocol v1) and replaces phase 2
 of the sidebar's proposal 13.
 
@@ -259,6 +260,32 @@ toolset on outrigger chats, plus whatever else the owner wants there.
      ids (3.3).
 
 ## 6. Milestones
+
+P1 as built, beyond the plan:
+- **Enabling.** The platform switches on automatically when the plugin's
+  `platform` setting is on (the default). It uses `is_connected` plus
+  `env_enablement_fn`, which seeds `extra.allow_from: [owner]`, so no
+  `config.yaml` edit is needed. A gateway restart is needed after changing it.
+- **Home channel.** `env_enablement_fn` also seeds a home channel, the shared
+  chat `home`. Cron results and cross-platform messages for Outrigger land there,
+  and any of the owner's clients can attach it. Without a home channel the gateway
+  opens every new conversation with a "No home channel is set" prompt.
+- **Outbox.** Replies for a chat whose client is away (up to 50 per chat) are
+  delivered on `chat.attach`.
+- **Streaming.** It follows the global `streaming` switch: a platform setting can
+  only narrow it (`StreamingConfig.enabled_for`). With streaming on, replies
+  arrive as `chat.edit` frames.
+- **Status sends.** Mid-turn status sends (tool progress, memory recall) carry no
+  public marker on plugin platforms (`non_conversational` is set for Discord
+  only; `_interim_send` is internal). The sidebar shows short emoji-led lines that
+  arrive before the reply as status lines. Possible upstream request: a public
+  status marker in `send()` metadata for plugin platforms.
+- **Live check, 2026-11-17:**
+  - `/model` and `/help` are answered by the gateway in about 3 s with no model
+    call.
+  - A client tool was called on a platform turn with the client bound to no
+    session, found purely from `HERMES_SESSION_CHAT_ID` (answer 2 confirmed).
+  - The sidebar asked about the open page and Hermes used `get_page`.
 
 - **P1, chat:** adapter registration, `chat.send` / `chat.message` / `chat.edit` /
   `chat.typing` / `chat.stop`, owner identity, tool binding on platform chats.

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 
-from . import context, dispatch, events, reviewer, settings
+from . import context, dispatch, events, platform, reviewer, settings
 from .registry import REGISTRY
 
 log = logging.getLogger("hermes.plugins.outrigger")
@@ -106,4 +106,5 @@ def register(ctx) -> None:
                 log.warning("outrigger: %s not mounted; restart the gateway to enable it", ROUTE)
         ctx.register_platform_handler("api_server", _wire)
 
+    platform.register(ctx)
     ctx.on_unload(REGISTRY.close_all)

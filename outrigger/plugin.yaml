@@ -20,5 +20,8 @@ config_schema:
   allow_subagents: {type: bool, default: false, description: "Let delegated subagents call attached clients"}
   review: {type: str, default: "smart", description: "smart: an LLM reviews calls that need approval (deny blocks; approve lets the client skip asking). off: no review"}
   review_timeout_s: {type: int, default: 30, description: "Reviewer call timeout"}
+  platform: {type: bool, default: true, description: "Register the Outrigger messaging platform: clients' chats go through Hermes's messaging pipeline (slash commands, /model). Gateway restart needed"}
+  platform_owner_id: {type: str, default: "owner", description: "User id for chats from clients authenticated with the API key"}
+  platform_owner_name: {type: str, default: "", description: "Display name for that user"}
   review_deny: {type: str, default: "ask", description: "ask: a reviewer deny is shown to the user as a flagged prompt they can override; block: a deny is final"}
   review_policy: {type: str, default: "", description: "Extra rules appended to the reviewer's instructions"}

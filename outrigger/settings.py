@@ -15,7 +15,10 @@ DEFAULTS = {
     "review": "smart",  # smart: LLM reviewer for non-auto calls; off: none
     "review_timeout_s": 30,
     "review_policy": "",
-    "review_deny": "ask",  # ask: a deny goes to the user as a flagged prompt; block: final  # extra trusted rules appended to the reviewer prompt
+    "review_deny": "ask",
+    "platform": True,  # register the Outrigger messaging platform (needs a gateway restart)
+    "platform_owner_id": "owner",  # user id for chats from key-authenticated clients
+    "platform_owner_name": "",  # ask: a deny goes to the user as a flagged prompt; block: final  # extra trusted rules appended to the reviewer prompt
 }
 
 SETTINGS: dict = dict(DEFAULTS)

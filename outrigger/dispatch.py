@@ -11,7 +11,7 @@ import json
 import logging
 import time
 
-from . import audit, reviewer, settings
+from . import audit, platform, reviewer, settings
 from .protocol import sanitize_text, validate_args
 from .registry import REGISTRY, Client, ClientGone
 
@@ -22,7 +22,29 @@ def _err(code: str, message: str = "", **extra) -> str:
     return json.dumps({"ok": False, "error": code, "message": message, **extra})
 
 
+def platform_chat_clients(session_id) -> list | None:
+    """On an Outrigger-platform turn, the client serving this chat (task-local session
+    identity via the public get_session_env); None on other platforms."""
+    try:
+        from gateway.session_context import get_session_env
+    except Exception:
+        return None
+    if get_session_env("HERMES_SESSION_PLATFORM") != platform.PLATFORM:
+        return None
+    if REGISTRY.is_subagent(session_id) and not settings.get("allow_subagents"):
+        return []
+    client = platform.client_for_chat(get_session_env("HERMES_SESSION_CHAT_ID"))
+    if client is None:
+        return []
+    if session_id:
+        REGISTRY.bind_extra(client, session_id)  # so per-session bookkeeping (cancel, caps) applies
+    return [client]
+
+
 def _clients(session_id, conversation_id):
+    on_platform = platform_chat_clients(session_id)
+    if on_platform is not None:
+        return on_platform
     return REGISTRY.for_session(session_id, conversation_id,
                                 allow_subagent=bool(settings.get("allow_subagents")))
 

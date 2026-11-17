@@ -11,8 +11,8 @@ import time
 
 from aiohttp import WSMsgType, web
 
-from . import events, settings
-from .protocol import PROTOCOL_VERSION, ProtocolError, one_line, parse_tools
+from . import events, platform, settings
+from .protocol import PROTOCOL_VERSION, SUPPORTED_PROTOCOLS, ProtocolError, one_line, parse_tools
 from .registry import REGISTRY, Client
 
 log = logging.getLogger("hermes.plugins.outrigger")
@@ -130,8 +130,7 @@ async def ws_handler(request: web.Request) -> web.StreamResponse:
             return ws
         log.info("outrigger: client %s (%s) attached, session %s, %d tool(s)",
                  client.id, client.name, client.session_id, len(client.tools))
-        await ws.send_json({"type": "welcome", "client_id": client.id,
-                            "session_id": client.session_id, "limits": _limits()})
+        await ws.send_json(_welcome(client, client.session_id))
 
         async for raw in ws:
             last_seen = time.monotonic()
@@ -148,6 +147,7 @@ async def ws_handler(request: web.Request) -> web.StreamResponse:
         ka.cancel()
         if client is not None:
             REGISTRY.remove(client)
+            platform.drop_client(client)
             log.info("outrigger: client %s detached", client.id)
         if not ws.closed:
             await ws.close()
@@ -165,8 +165,8 @@ def _decode(raw) -> dict | None:
 
 
 def _register(msg: dict, ws, loop) -> Client:
-    if msg.get("protocol") != PROTOCOL_VERSION:
-        raise ProtocolError("bad_protocol", f"supported protocol: {PROTOCOL_VERSION}")
+    if msg.get("protocol") not in SUPPORTED_PROTOCOLS:
+        raise ProtocolError("bad_protocol", f"supported protocols: {sorted(SUPPORTED_PROTOCOLS)}")
     info = msg.get("client")
     if not isinstance(info, dict) or not isinstance(info.get("name"), str) or not info["name"]:
         raise ProtocolError("bad_hello", "client.name is required")
@@ -188,10 +188,53 @@ def _register(msg: dict, ws, loop) -> Client:
         concurrency=concurrency,
     )
     client.redaction = _parse_redaction(msg.get("redaction"))
+    caps = msg.get("capabilities")
+    client.capabilities = {one_line(c, 32) for c in caps[:32] if isinstance(c, str)} if isinstance(caps, list) else set()
     old = REGISTRY.add(client)
     if old is not None:
         loop.create_task(old.ws.close())
     return client
+
+
+def _welcome(client: Client, session_id) -> dict:
+    msg = {"type": "welcome", "client_id": client.id, "session_id": session_id, "limits": _limits()}
+    if "chat" in client.capabilities:
+        # Tells the client whether chat can go through the Outrigger platform right now.
+        msg["platform"] = {"name": platform.PLATFORM, "available": platform.available()}
+    return msg
+
+
+_CHAT_ID_RE = __import__("re").compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+
+
+async def _handle_chat(client: Client, t: str, m: dict, ws) -> None:
+    """Outrigger platform (protocol 2): chat messages go to Hermes's messaging pipeline."""
+    if "chat" not in client.capabilities:
+        raise ProtocolError("no_chat_capability", "declare the 'chat' capability in hello")
+    local = m.get("chat_id")
+    if not isinstance(local, str) or not _CHAT_ID_RE.match(local):
+        raise ProtocolError("bad_chat", "chat_id: 1-128 of A-Z a-z 0-9 _ . : -")
+    if not platform.available():
+        raise ProtocolError("platform_unavailable", "the outrigger platform is not connected; restart the gateway or check the plugin's platform setting")
+    if t == "chat.attach":
+        platform.attach(client, local)
+        await platform.flush_outbox(client, local)
+        return
+    if t == "chat.stop":
+        if not platform.owns(client, local):
+            raise ProtocolError("not_your_chat", "attach or send to this chat first")
+        await platform.inbound(client, local, "/stop", "ostop_" + __import__("secrets").token_hex(4))
+        return
+    text = m.get("text")
+    if not isinstance(text, str) or not text.strip():
+        raise ProtocolError("bad_chat", "text must be a non-empty string")
+    if len(text) > MAX_MSG:
+        raise ProtocolError("bad_chat", "text too long")
+    mid = m.get("client_msg_id")
+    mid = one_line(mid, 64) if isinstance(mid, str) and mid else "oin_" + __import__("secrets").token_hex(6)
+    platform.attach(client, local)
+    await platform.inbound(client, local, text, mid)
+    await ws.send_json({"type": "chat.accepted", "chat_id": local, "client_msg_id": mid})
 
 
 def _parse_redaction(raw) -> dict | None:
@@ -211,8 +254,7 @@ async def _handle(client: Client, m: dict, ws) -> None:
         if not isinstance(sid, str) or not sid:
             raise ProtocolError("bad_bind", "session_id must be a non-empty string")
         REGISTRY.bind(client, sid)
-        await ws.send_json({"type": "welcome", "client_id": client.id,
-                            "session_id": sid, "limits": _limits()})
+        await ws.send_json(_welcome(client, sid))
     elif t == "tools.update":
         client.tools = parse_tools(m.get("tools"))
     elif t == "context.update":
@@ -226,6 +268,8 @@ async def _handle(client: Client, m: dict, ws) -> None:
             "ok": ok, "content": m.get("content"),
             "error": m.get("error") if not ok else None,
         })
+    elif t in ("chat.send", "chat.attach", "chat.stop"):
+        await _handle_chat(client, t, m, ws)
     elif t == "progress":
         call_id = m.get("call_id")
         if not isinstance(call_id, str):
