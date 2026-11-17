@@ -222,8 +222,9 @@ toolset on outrigger chats, plus whatever else the owner wants there.
        client renders that reply.
      - Autocomplete uses a static list generated at build time from the
        published slash-command reference, plus the client's own commands.
-   - File an upstream request for a public catalog function (name, args hint,
-     description, gateway availability).
+   - Upstream: already requested in NousResearch/hermes-agent#149673 (public
+     `gateway_command_catalog()` for platform plugins); our comment is in
+     `docs/upstream/command-catalog-comment-149673.md`. Switch to it when it lands.
 4. **What are the picker signatures and callbacks? Confirmed from the Discord
    adapter and the call sites (`gateway/slash_commands_model.py`).**
    - **Model picker:** `send_model_picker(chat_id, providers, current_model,
