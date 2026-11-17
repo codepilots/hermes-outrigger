@@ -46,6 +46,7 @@ Reference client: `clients/python_client.py`.
 - docs/spec.md: design, protocol, security model, open questions
 - docs/scenarios.md: where an outrigger fits, where it doesn't (vs MCP, vs a plugin)
 - docs/platform.md: proposal for the Outrigger platform, which makes clients a full Hermes messaging platform (slash commands, model picker, approvals)
+- docs/notebook.md: proposal for Notebook mode: edit Markdown notes on the Hermes host from a client, with `//` lines as commands to Hermes
 
 The first client will be the Hermes Sidebar Chromium extension
 (github.com/codepilots/hermes-sidebar), exposing page tools such as run_js.
