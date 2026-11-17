@@ -183,7 +183,7 @@ async def test_register_wires_everything():
 
     ctx = Ctx()
     register(ctx)
-    assert set(ctx.tools) == {"outrigger_call", "outrigger_tools"}
+    assert set(ctx.tools) == {"outrigger_call", "outrigger_tools", "notebook_read", "notebook_edit"}
     assert set(ctx.hooks) == {"pre_llm_call", "on_session_end", "subagent_start", "subagent_stop"}
     app = web.Application()
     ctx.platforms["api_server"](app, object())

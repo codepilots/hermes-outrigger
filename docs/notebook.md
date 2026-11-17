@@ -1,6 +1,7 @@
-# Notebook mode: edit a note on the Hermes host, with `//` commands (proposal)
+# Notebook mode: edit a note on the Hermes host, with `//` commands
 
-Date: 2026-11-17. Status: proposal. Builds on the Outrigger platform
+Date: 2026-11-17. Status: **N1 and N2 implemented** (2026-11-17,
+`outrigger/notebook.py`, sidebar `notebook.js`); N3-N4 proposed. Builds on the Outrigger platform
 (docs/platform.md) and the browser sidebar.
 
 Decided (2026-11-17):
@@ -177,7 +178,32 @@ editor is locked), but the composer can still send ordinary chat or `/stop`.
    later selection-based variant (select text, then `//`) would just add "the
    user had selected lines X-Y" to the message, still for Hermes to weigh.
 
-## 8. Milestones
+## 8. As built (N1-N2)
+
+- **Settings.** `notebook_roots` defaults to none, so Notebook mode is off until
+  configured. Also `notebook_max_bytes` (2 MB) and `notebook_lock_timeout_s`
+  (600). Owner only; token clients are refused.
+- **Editor.** CodeMirror 6 (state, view, commands, Markdown-only language, search)
+  plus diff-match-patch in `vendor/editor.js`, 362 KB, built by
+  `tools/build-editor.sh` with npm `--before`.
+- **The Enter rule.** A `//` line is sent only when Enter is pressed at the end
+  of that line with nothing selected. Anywhere else Enter is an ordinary
+  newline. This came from a live run: typing `//` in front of existing text would
+  otherwise send (and remove) that text.
+- **Merging.** Outside changes merge three-way client-side (diff-match-patch:
+  my edits, from the last synced text, applied on top of theirs). A failed merge
+  shows a conflict bar with "Use theirs" / "Keep mine".
+- **Ending a command.** The note chat's session comes from `pre_llm_call` (chat id
+  via `get_session_env`), and `on_session_end` unlocks. The lock timeout is the
+  fallback.
+- **Prompts during a command.** Approvals or clarify questions raised during a
+  command render in the Note view and are answered on the note's chat.
+- **Live check, 2026-11-17:** on a scratch note in `~/vaults/notes` (deleted
+  afterwards), `//correct my spelling` was sent. The note locked, Hermes
+  corrected all four mistakes through `notebook_read` / `notebook_edit` and left
+  other text alone, and the editor unlocked with the change highlighted.
+
+## 9. Milestones
 
 - **N1, files:** roots, `doc.list/open/update/close`, versions, atomic writes,
   watcher with `doc.changed`, conflict bar. Sidebar Note view with the CodeMirror
@@ -190,7 +216,7 @@ editor is locked), but the composer can still send ordinary chat or `/stop`.
 - **N4, sharing:** per-user roots for paired tokens, and several clients on one
   note (presence, lock shown to everyone).
 
-## 9. Testing
+## 10. Testing
 
 - **Path safety:** `..`, absolute paths, symlinks out of the root, non-`.md`
   files, hidden folders.

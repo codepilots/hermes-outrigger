@@ -4,7 +4,7 @@ manifest_version: 2
 description: Let a thin client attach to a Hermes session and offer tools that run on the client.
 author: Autumn Thomson
 license: MIT
-provides_tools: [outrigger_call, outrigger_tools]
+provides_tools: [outrigger_call, outrigger_tools, notebook_read, notebook_edit]
 provides_hooks: [pre_llm_call, on_session_end, subagent_start, subagent_stop]
 python_dependencies: ["jsonschema>=4,<5"]
 config_schema:
@@ -20,6 +20,9 @@ config_schema:
   allow_subagents: {type: bool, default: false, description: "Let delegated subagents call attached clients"}
   review: {type: str, default: "smart", description: "smart: an LLM reviews calls that need approval (deny blocks; approve lets the client skip asking). off: no review"}
   review_timeout_s: {type: int, default: 30, description: "Reviewer call timeout"}
+  notebook_roots: {type: dict, default: {}, description: "Notebook mode: name -> folder whose .md notes the owner's clients may open and edit, e.g. {notes: ~/vaults/notes}"}
+  notebook_max_bytes: {type: int, default: 2097152, description: "Largest note Notebook mode opens or writes"}
+  notebook_lock_timeout_s: {type: int, default: 600, description: "A // command's lock is released after this long"}
   platform: {type: bool, default: true, description: "Register the Outrigger messaging platform: clients' chats go through Hermes's messaging pipeline (slash commands, /model). Gateway restart needed"}
   platform_owner_id: {type: str, default: "owner", description: "User id for chats from clients authenticated with the API key"}
   platform_owner_name: {type: str, default: "", description: "Display name for that user"}

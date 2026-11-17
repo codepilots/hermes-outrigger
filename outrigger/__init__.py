@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 
-from . import context, dispatch, events, platform, reviewer, settings
+from . import context, dispatch, events, notebook, platform, reviewer, settings
 from .registry import REGISTRY
 
 log = logging.getLogger("hermes.plugins.outrigger")
@@ -43,6 +43,7 @@ def _pre_llm_call(session_id=None, turn_id=None, parent_session_id=None,
         return None
     if turn_id:
         REGISTRY.turns[session_id] = turn_id
+    notebook.turn_started(session_id)  # ties a // note command's lock to its session
     user_message = kw.get("user_message")
     if isinstance(user_message, str):
         REGISTRY.intent[session_id] = user_message[-4000:]
@@ -60,6 +61,7 @@ def _pre_llm_call(session_id=None, turn_id=None, parent_session_id=None,
 def _on_session_end(session_id=None, interrupted=False, **kw):
     if not session_id:
         return
+    notebook.turn_ended(session_id)  # a // command's turn finished or was stopped: unlock
     if interrupted:
         dispatch.cancel_session(session_id)
     else:
@@ -90,6 +92,11 @@ def register(ctx) -> None:
                       handler=dispatch.outrigger_call, emoji="\U0001f6f6")
     ctx.register_tool(name="outrigger_tools", toolset="outrigger", schema=TOOLS_SCHEMA,
                       handler=dispatch.outrigger_tools, emoji="\U0001f6f6")
+    # Notebook mode: Hermes's edits during a // note command (scoped to that note and turn).
+    ctx.register_tool(name="notebook_read", toolset="outrigger", schema=notebook.READ_SCHEMA,
+                      handler=notebook.tool_read, emoji="\U0001f4dd")
+    ctx.register_tool(name="notebook_edit", toolset="outrigger", schema=notebook.EDIT_SCHEMA,
+                      handler=notebook.tool_edit, emoji="\U0001f4dd")
     ctx.register_hook("pre_llm_call", _pre_llm_call)
     ctx.register_hook("on_session_end", _on_session_end)
     ctx.register_hook("subagent_start", _subagent_start)

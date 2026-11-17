@@ -11,7 +11,7 @@ import time
 
 from aiohttp import WSMsgType, web
 
-from . import events, platform, settings, tokens
+from . import events, notebook, platform, settings, tokens
 from .protocol import PROTOCOL_VERSION, SUPPORTED_PROTOCOLS, ProtocolError, one_line, parse_tools
 from .registry import REGISTRY, Client
 
@@ -170,6 +170,7 @@ async def ws_handler(request: web.Request) -> web.StreamResponse:
         if client is not None:
             REGISTRY.remove(client)
             platform.drop_client(client)
+            notebook.drop_client(client)
             log.info("outrigger: client %s detached", client.id)
         if not ws.closed:
             await ws.close()
@@ -272,6 +273,71 @@ async def _handle_chat(client: Client, t: str, m: dict, ws) -> None:
     await ws.send_json({"type": "chat.accepted", "chat_id": local, "client_msg_id": mid})
 
 
+async def _handle_doc(client: Client, t: str, m: dict, ws) -> None:
+    """Notebook mode (docs/notebook.md): notes on the Hermes host, `//` commands."""
+    if "notebook" not in client.capabilities:
+        raise ProtocolError("no_notebook_capability", "declare the 'notebook' capability in hello")
+    if client.principal.get("kind") != "owner":
+        raise ProtocolError("not_allowed", "notebook mode is for the owner")
+    if not notebook.enabled():
+        raise ProtocolError("notebook_off", "no notebook_roots configured in the outrigger plugin settings")
+    doc_id = m.get("doc_id")
+    try:
+        if t == "doc.list":
+            await ws.send_json({"type": "doc.list", "roots": sorted(notebook.roots()),
+                                "notes": notebook.listing(m.get("root"), str(m.get("query") or ""), m.get("limit") or 50)})
+        elif t == "doc.open":
+            doc = notebook.open_doc(str(m.get("root") or ""), str(m.get("path") or ""), client)
+            notebook.ensure_watcher()
+            await ws.send_json(notebook.content_frame(doc))
+        elif t == "doc.close":
+            notebook.close_doc(str(doc_id), client)
+        elif t == "doc.update":
+            doc = notebook.get(str(doc_id), client)
+            text = m.get("text")
+            if not isinstance(text, str):
+                raise notebook.NotebookError("bad_update", "text must be a string")
+            version = notebook.update(doc, str(m.get("base_version")), text)
+            await ws.send_json({"type": "doc.saved", "doc_id": doc.doc_id, "version": version})
+            notebook.broadcast(doc, {"type": "doc.changed", "doc_id": doc.doc_id, "text": doc.text,
+                                     "version": version, "by": "other-client"}, exclude=client)
+        elif t == "doc.undo":
+            doc = notebook.get(str(doc_id), client)
+            notebook.undo(doc, str(m.get("snapshot") or ""))
+            notebook.broadcast(doc, notebook.content_frame(doc, by="undo"))
+        elif t == "doc.command":
+            doc = notebook.get(str(doc_id), client)
+            if not platform.available():
+                raise notebook.NotebookError("platform_unavailable", "// commands need the Outrigger platform")
+            if "chat" not in client.capabilities:
+                raise notebook.NotebookError("no_chat", "// commands need the 'chat' capability")
+            line, instruction = int(m.get("line") or 0), str(m.get("instruction") or "")
+            lock = notebook.start_command(doc, client, str(m.get("base_version")), line, instruction)
+            local = notebook.note_chat_id(doc)
+            key = platform.chat_key(client, local)
+            lock["chat_key"] = key
+            notebook.NOTE_CHATS[key] = doc.doc_id
+            notebook.broadcast(doc, {"type": "doc.lock", "doc_id": doc.doc_id, "locked": True, "by": "hermes",
+                                     "instruction": lock["instruction"], "snapshot": lock["snapshot"],
+                                     "chat_id": local})
+            notebook.broadcast(doc, notebook.content_frame(doc, by="command"))
+            try:
+                await platform.inbound(client, local, notebook.command_message(doc, line, lock["instruction"]),
+                                       "ndoc_" + __import__("secrets").token_hex(5))
+            except Exception as e:
+                notebook.end_command(doc, notice=f"could not start Hermes: {e}")
+        else:
+            raise ProtocolError("unknown_type", f"unknown message type: {t!r}")
+    except notebook.NotebookError as e:
+        err = {"type": "doc.error", "doc_id": doc_id, "code": e.code, "message": e.message}
+        d = notebook.DOCS.get(str(doc_id))
+        if e.code == "conflict" and d is not None:
+            err.update(text=d.text, version=d.version)
+        await ws.send_json(err)
+    except OSError as e:
+        await ws.send_json({"type": "doc.error", "doc_id": doc_id, "code": "io_error", "message": str(e)[:200]})
+
+
 def _parse_redaction(raw) -> dict | None:
     """Optional hello field: the client replaces personal data with ⟦…⟧ placeholders."""
     if not isinstance(raw, dict) or not raw.get("enabled"):
@@ -305,6 +371,8 @@ async def _handle(client: Client, m: dict, ws) -> None:
             "ok": ok, "content": m.get("content"),
             "error": m.get("error") if not ok else None,
         })
+    elif t.startswith("doc."):
+        await _handle_doc(client, t, m, ws)
     elif t == "chat.commands":
         if "chat" not in client.capabilities:
             raise ProtocolError("no_chat_capability", "declare the 'chat' capability in hello")

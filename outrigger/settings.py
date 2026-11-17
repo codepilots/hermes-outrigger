@@ -16,6 +16,10 @@ DEFAULTS = {
     "review_timeout_s": 30,
     "review_policy": "",
     "review_deny": "ask",
+    # Notebook mode: {"name": "~/path"} roots whose .md notes the owner's clients may open.
+    "notebook_roots": {},
+    "notebook_max_bytes": 2 * 1024 * 1024,
+    "notebook_lock_timeout_s": 600,
     "platform": True,  # register the Outrigger messaging platform (needs a gateway restart)
     "platform_owner_id": "owner",  # user id for chats from key-authenticated clients
     "platform_owner_name": "",
