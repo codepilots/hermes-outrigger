@@ -12,8 +12,10 @@ gateway.config (public plugin API).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import secrets
+import time
 from collections import deque
 
 from . import settings
@@ -32,6 +34,20 @@ CHATS: dict[str, Client] = {}
 # Replies for chats whose client is disconnected, delivered on chat.attach.
 OUTBOX: dict[str, deque] = {}
 ADAPTER = None  # the live adapter, set on connect
+
+# Interactive prompts waiting for the user (P2): id -> {kind, chat, created, ...}.
+PENDING: dict[str, dict] = {}
+PENDING_TTL = 15 * 60
+MAX_PICKER_MODELS = 50
+
+
+def _new_prompt(kind: str, chat: str, **data) -> str:
+    now = time.time()
+    for k in [k for k, v in PENDING.items() if now - v["created"] > PENDING_TTL]:
+        PENDING.pop(k, None)
+    pid = f"{kind[:2]}_{secrets.token_hex(6)}"
+    PENDING[pid] = {"kind": kind, "chat": chat, "created": now, **data}
+    return pid
 
 
 def chat_key(client: Client, local_id: str) -> str:
@@ -134,6 +150,106 @@ def _make_adapter_class():
             if client is not None:
                 await _send_frame(client, {"type": "chat.typing", "chat_id": local_id(client, chat_id)})
 
+        # ---- interactive prompts (P2): rendered as cards by the client
+        def _supports(self, chat_id: str, capability: str) -> bool:
+            client = client_for_chat(chat_id)
+            return client is not None and capability in client.capabilities
+
+        async def send_model_picker(self, chat_id, providers, current_model, current_provider,
+                                    session_key, on_model_selected, metadata=None):
+            if not self._supports(chat_id, "model_picker"):
+                return SendResult(success=False, error="client has no model picker")
+            rows = [{"slug": str(p.get("slug", "")), "name": str(p.get("name") or p.get("slug", "")),
+                     "is_current": bool(p.get("is_current")),
+                     "models": [str(m) for m in (p.get("models") or [])][:MAX_PICKER_MODELS],
+                     "total_models": int(p.get("total_models") or len(p.get("models") or []))}
+                    for p in providers if isinstance(p, dict) and p.get("slug")]
+            pid = _new_prompt("model", chat_id, callback=on_model_selected)
+            ok = await self._deliver(chat_id, {"type": "chat.model_picker", "id": pid,
+                                               "current": {"model": current_model, "provider": current_provider},
+                                               "providers": rows})
+            return SendResult(success=ok, message_id=pid)
+
+        async def send_choice_picker(self, chat_id, title, choices, session_key, on_choice_selected,
+                                     metadata=None):
+            if not self._supports(chat_id, "choices"):
+                return SendResult(success=False, error="client has no choice picker")
+            opts = [{"value": str(c.get("value")), "label": str(c.get("label") or c.get("value")),
+                     "is_current": bool(c.get("is_current"))} for c in choices if isinstance(c, dict)]
+            pid = _new_prompt("choice", chat_id, callback=on_choice_selected,
+                              values={o["value"] for o in opts})
+            ok = await self._deliver(chat_id, {"type": "chat.choice", "id": pid, "title": title or "",
+                                               "options": opts})
+            return SendResult(success=ok, message_id=pid)
+
+        async def send_clarify(self, chat_id, question, choices, clarify_id, session_key, metadata=None):
+            if not choices or not self._supports(chat_id, "clarify"):
+                # Open-ended questions, or a client without cards: the gateway's text flow.
+                return await super().send_clarify(chat_id, question, choices, clarify_id, session_key, metadata)
+            from tools.clarify_gateway import get_pending
+            entry = get_pending(clarify_id)
+            multi = bool(getattr(entry, "multi_select", False))
+            pid = _new_prompt("clarify", chat_id, clarify_id=clarify_id, entry=entry,
+                              choices=[str(c) for c in choices], multi=multi)
+            ok = await self._deliver(chat_id, {"type": "chat.clarify", "id": pid, "question": question,
+                                               "choices": [str(c) for c in choices], "multi": multi})
+            return SendResult(success=ok, message_id=pid)
+
+        async def _send_exec_approval_prompt(self, prompt):
+            if not self._supports(prompt.chat_id, "approvals"):
+                return SendResult(success=False, error="client has no approval cards")
+            pid = _new_prompt("approval", prompt.chat_id, session_key=prompt.session_key,
+                              request_id=prompt.request_id, choices={a[1] for a in prompt.actions})
+            ok = await self._deliver(prompt.chat_id, {
+                "type": "chat.approval", "id": pid, "text": prompt.text, "command": prompt.command,
+                "description": prompt.description, "smart_denied": bool(prompt.smart_denied),
+                "actions": [{"label": a[0], "choice": a[1], "style": a[2]} for a in prompt.actions]})
+            return SendResult(success=ok, message_id=pid)
+
+        async def answer(self, client: Client, local: str, kind: str, pid: str, value) -> str:
+            """Resolve a prompt the client answered. Returns a short status for the client."""
+            key = chat_key(client, local)
+            p = PENDING.get(pid)
+            if p is None or p["kind"] != kind or p["chat"] != key:
+                return "expired"
+            PENDING.pop(pid, None)
+            if kind == "model":
+                if not isinstance(value, dict) or not value.get("model") or not value.get("provider"):
+                    return "bad_value"
+                text = await p["callback"](key, str(value["model"]), str(value["provider"]))
+                if text:
+                    await self.send(key, str(text))
+                return "ok"
+            if kind == "choice":
+                if str(value) not in p["values"]:
+                    return "bad_value"
+                text = await p["callback"](key, str(value))
+                if text:
+                    await self.send(key, str(text))
+                return "ok"
+            if kind == "clarify":
+                from tools.clarify_gateway import get_pending, mark_awaiting_text, resolve_gateway_clarify
+                if get_pending(p["clarify_id"]) is not p["entry"]:
+                    return "expired"
+                if value == "__other__":   # the user will type the answer as their next message
+                    mark_awaiting_text(p["clarify_id"])
+                    return "ok"
+                picked = value if isinstance(value, list) else [value]
+                picked = [str(v) for v in picked if str(v) in p["choices"]]
+                if not picked:
+                    return "bad_value"
+                answer = json.dumps(picked) if p["multi"] else picked[0]
+                return "ok" if resolve_gateway_clarify(p["clarify_id"], answer) else "expired"
+            if kind == "approval":
+                from tools.approval import resolve_gateway_approval_card
+                if value not in p["choices"]:
+                    return "bad_value"
+                n = resolve_gateway_approval_card(
+                    p["session_key"], str(value), p["request_id"],
+                    actor_id=settings.get("platform_owner_id"), extra=getattr(self.config, "extra", None))
+                return "ok" if n else "expired"
+            return "bad_kind"
+
         async def get_chat_info(self, chat_id):
             client = client_for_chat(chat_id)
             return {"name": f"{client.label or client.name}" if client else chat_id,
@@ -165,6 +281,17 @@ async def inbound(client: Client, local: str, text: str, message_id: str) -> Non
         asyncio.get_running_loop().create_task(coro)
     else:
         asyncio.run_coroutine_threadsafe(coro, adapter._loop)
+
+
+async def action(client: Client, local: str, kind: str, pid: str, value) -> str:
+    """Run a client's answer to a prompt on the adapter's loop."""
+    adapter = ADAPTER
+    if adapter is None:
+        return "platform_unavailable"
+    coro = adapter.answer(client, local, kind, pid, value)
+    if adapter._loop is None or adapter._loop is asyncio.get_running_loop():
+        return await coro
+    return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(coro, adapter._loop))
 
 
 async def flush_outbox(client: Client, local: str) -> int:

@@ -220,6 +220,15 @@ async def _handle_chat(client: Client, t: str, m: dict, ws) -> None:
         platform.attach(client, local)
         await platform.flush_outbox(client, local)
         return
+    if t == "chat.action":
+        if not platform.owns(client, local):
+            raise ProtocolError("not_your_chat", "attach or send to this chat first")
+        kind, pid = m.get("kind"), m.get("id")
+        if kind not in ("model", "choice", "clarify", "approval") or not isinstance(pid, str):
+            raise ProtocolError("bad_action", "kind: model|choice|clarify|approval; id: string")
+        status = await platform.action(client, local, kind, pid, m.get("value"))
+        await ws.send_json({"type": "chat.action_result", "chat_id": local, "id": pid, "status": status})
+        return
     if t == "chat.stop":
         if not platform.owns(client, local):
             raise ProtocolError("not_your_chat", "attach or send to this chat first")
@@ -268,7 +277,7 @@ async def _handle(client: Client, m: dict, ws) -> None:
             "ok": ok, "content": m.get("content"),
             "error": m.get("error") if not ok else None,
         })
-    elif t in ("chat.send", "chat.attach", "chat.stop"):
+    elif t in ("chat.send", "chat.attach", "chat.stop", "chat.action"):
         await _handle_chat(client, t, m, ws)
     elif t == "progress":
         call_id = m.get("call_id")

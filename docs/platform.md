@@ -1,7 +1,7 @@
 # Outrigger platform: a messaging platform for outrigger clients
 
-Date: 2026-11-16. Status: **P1 implemented** (2026-11-17, `outrigger/platform.py`;
-sidebar uses it); P2-P4 proposed. Open questions answered against the Hermes
+Date: 2026-11-16. Status: **P1 and P2 implemented** (2026-11-17,
+`outrigger/platform.py`; the sidebar uses both); P3-P4 proposed. Open questions answered against the Hermes
 v0.23.1 source (section 5). Extends spec.md (protocol v1) and replaces phase 2
 of the sidebar's proposal 13.
 
@@ -286,6 +286,31 @@ P1 as built, beyond the plan:
   - A client tool was called on a platform turn with the client bound to no
     session, found purely from `HERMES_SESSION_CHAT_ID` (answer 2 confirmed).
   - The sidebar asked about the open page and Hermes used `get_page`.
+
+P2 as built:
+- **Card types.** Model picker, choice picker, clarify (single, multi and
+  "Other"), and command approvals are rendered as cards. Each is sent only to
+  clients that declared the matching capability (`model_picker`, `choices`,
+  `clarify`, `approvals`). Otherwise the hook reports failure and the gateway uses
+  its text flow.
+- **Answers.** The client answers with
+  `chat.action {chat_id, kind, id, value}` and gets
+  `chat.action_result {id, status}` (`ok`, `expired` or `bad_value`). A prompt
+  is answered once, only from the client's own chat, and expires after 15 min.
+- **Resolution.** Approvals resolve through `resolve_gateway_approval_card`, with
+  the owner as the actor. Clarify uses `resolve_gateway_clarify` (multi-select as
+  a JSON array string, which the clarify tool parses) or `mark_awaiting_text` for
+  "Other".
+- **Slash confirmations** (`/reload-mcp` style) keep the gateway's text fallback
+  (`/approve`, `/always`, `/cancel`). The button path needs
+  `GatewayRunner._resolve_slash_confirm`, which is not public.
+- **Live check, 2026-11-17:**
+  - `/model` showed Hermes's real picker (52 providers) as a card. Choosing the
+    current model went through Hermes's callback ("Model switched to …, session
+    only").
+  - `/reasoning` showed its choices. Picking the current one went through too.
+  - Clarify and approvals were checked in the real extension against the
+    adapter, with stand-in resolvers.
 
 - **P1, chat:** adapter registration, `chat.send` / `chat.message` / `chat.edit` /
   `chat.typing` / `chat.stop`, owner identity, tool binding on platform chats.

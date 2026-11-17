@@ -77,6 +77,17 @@ def _install_fake_gateway():
         message_id: str | None = None
     ev.MessageType, ev.MessageEvent = MessageType, MessageEvent
 
+    tools_mod = types.ModuleType("tools")
+    cg = types.ModuleType("tools.clarify_gateway")
+    cg.ENTRIES, cg.RESOLVED, cg.AWAITING = {}, [], []
+    cg.get_pending = lambda cid: cg.ENTRIES.get(cid)
+    cg.resolve_gateway_clarify = lambda cid, text: (cg.RESOLVED.append((cid, text)), cid in cg.ENTRIES)[1]
+    cg.mark_awaiting_text = lambda cid: cg.AWAITING.append(cid)
+    ap = types.ModuleType("tools.approval")
+    ap.CALLS = []
+    ap.resolve_gateway_approval_card = lambda sk, choice, rid, actor_id=None, extra=None: (ap.CALLS.append((sk, choice, rid, actor_id)), 1)[1]
+    sys.modules.update({"tools": tools_mod, "tools.clarify_gateway": cg, "tools.approval": ap})
+
     sc = types.ModuleType("gateway.session_context")
     sc.get_session_env = lambda name, default="": SESSION_ENV.get(name, default)
 
@@ -88,7 +99,7 @@ def _install_fake_gateway():
 
 @pytest.fixture
 def adapter(monkeypatch):
-    saved = {k: v for k, v in sys.modules.items() if k == "gateway" or k.startswith("gateway.")}
+    saved = {k: v for k, v in sys.modules.items() if k in ("gateway", "tools") or k.startswith(("gateway.", "tools."))}
     _install_fake_gateway()
     SESSION_ENV.clear(); HANDLED.clear()
     from outrigger import platform
@@ -104,9 +115,12 @@ def adapter(monkeypatch):
     a.registered = registered
     yield a
     platform.ADAPTER = None
-    for k in [k for k in sys.modules if k == "gateway" or k.startswith("gateway.")]:
+    for k in [k for k in sys.modules if k in ("gateway", "tools") or k.startswith(("gateway.", "tools."))]:
         del sys.modules[k]
     sys.modules.update(saved)
+
+
+ALL_CAPS = ("chat", "model_picker", "choices", "clarify", "approvals")
 
 
 async def chat_client(c, name="sb", caps=("chat",), session="S1"):
@@ -265,3 +279,120 @@ async def test_home_chat_is_shared_and_buffered(aiohttp_client, adapter):
     await ws.send_json({"type": "chat.attach", "chat_id": "home"})
     m = await next_of(ws, "chat.message")
     assert m["chat_id"] == "home" and m["text"] == "cron: nightly report"
+
+
+
+async def _platform_chat(aiohttp_client, adapter, caps=ALL_CAPS):
+    await adapter.connect()
+    c = await start(aiohttp_client)
+    ws, _ = await chat_client(c, caps=caps)
+    await ws.send_json({"type": "chat.send", "chat_id": "conv-1", "text": "hi"})
+    await next_of(ws, "chat.accepted")
+    return c, ws
+
+
+SKIPPED_FRAMES: list = []
+
+
+async def act(ws, kind, pid, value, chat="conv-1"):
+    """Answer a prompt; frames that arrive before the result are kept in SKIPPED_FRAMES."""
+    await ws.send_json({"type": "chat.action", "chat_id": chat, "kind": kind, "id": pid, "value": value})
+    SKIPPED_FRAMES.clear()
+    while True:
+        m = await ws.receive_json(timeout=2)
+        if m["type"] == "chat.action_result":
+            return m["status"]
+        SKIPPED_FRAMES.append(m)
+
+
+async def test_model_picker(aiohttp_client, adapter):
+    c, ws = await _platform_chat(aiohttp_client, adapter)
+    picked = []
+
+    async def on_selected(chat, model, provider):
+        picked.append((chat, model, provider)); return f"Switched to {model}"
+    providers = [{"slug": "nous", "name": "Nous Portal", "is_current": True, "models": ["a", "b"], "total_models": 69},
+                 {"slug": "anthropic", "name": "Anthropic", "models": ["claude-opus-5-5"]}]
+    r = await adapter.send_model_picker("sb:conv-1", providers, "a", "nous", "sk", on_selected)
+    assert r.success
+    card = await next_of(ws, "chat.model_picker")
+    assert card["current"] == {"model": "a", "provider": "nous"} and card["providers"][0]["total_models"] == 69
+    assert await act(ws, "model", card["id"], {"model": "claude-opus-5-5", "provider": "anthropic"}) == "ok"
+    assert picked == [("sb:conv-1", "claude-opus-5-5", "anthropic")]
+    assert [f["text"] for f in SKIPPED_FRAMES if f["type"] == "chat.message"] == ["Switched to claude-opus-5-5"]
+    assert await act(ws, "model", card["id"], {"model": "x", "provider": "y"}) == "expired"  # one answer only
+
+
+async def test_prompts_need_client_capability(aiohttp_client, adapter):
+    c, ws = await _platform_chat(aiohttp_client, adapter, caps=("chat",))
+    r = await adapter.send_model_picker("sb:conv-1", [{"slug": "x", "models": []}], "", "", "sk", None)
+    assert not r.success  # the gateway falls back to its text listing
+
+
+async def test_choice_picker(aiohttp_client, adapter):
+    c, ws = await _platform_chat(aiohttp_client, adapter)
+    got = []
+
+    async def on_choice(chat, value):
+        got.append(value); return f"Reasoning: {value}"
+    await adapter.send_choice_picker("sb:conv-1", "Reasoning effort", [
+        {"value": "low", "label": "Low"}, {"value": "high", "label": "High", "is_current": True}], "sk", on_choice)
+    card = await next_of(ws, "chat.choice")
+    assert [o["value"] for o in card["options"]] == ["low", "high"]
+    assert await act(ws, "choice", card["id"], "medium") == "bad_value"
+    card2_id = card["id"]
+    # bad value consumed it; send another and answer properly
+    await adapter.send_choice_picker("sb:conv-1", "Reasoning effort", [{"value": "low", "label": "Low"}], "sk", on_choice)
+    card2 = await next_of(ws, "chat.choice")
+    assert card2["id"] != card2_id and await act(ws, "choice", card2["id"], "low") == "ok"
+    assert got == ["low"] and [f["text"] for f in SKIPPED_FRAMES if f["type"] == "chat.message"] == ["Reasoning: low"]
+
+
+async def test_clarify_single_multi_other(aiohttp_client, adapter):
+    cg = sys.modules["tools.clarify_gateway"]
+    c, ws = await _platform_chat(aiohttp_client, adapter)
+    cg.ENTRIES["q1"] = types.SimpleNamespace(multi_select=False)
+    await adapter.send_clarify("sb:conv-1", "Which file?", ["a.txt", "b.txt"], "q1", "sk")
+    card = await next_of(ws, "chat.clarify")
+    assert card["choices"] == ["a.txt", "b.txt"] and card["multi"] is False
+    assert await act(ws, "clarify", card["id"], "b.txt") == "ok" and cg.RESOLVED[-1] == ("q1", "b.txt")
+
+    cg.ENTRIES["q2"] = types.SimpleNamespace(multi_select=True)
+    await adapter.send_clarify("sb:conv-1", "Which?", ["x", "y", "z"], "q2", "sk")
+    card = await next_of(ws, "chat.clarify")
+    assert card["multi"] is True
+    assert await act(ws, "clarify", card["id"], ["x", "z", "evil"]) == "ok"
+    assert cg.RESOLVED[-1] == ("q2", json.dumps(["x", "z"]))
+
+    cg.ENTRIES["q3"] = types.SimpleNamespace(multi_select=False)
+    await adapter.send_clarify("sb:conv-1", "Name?", ["Ann"], "q3", "sk")
+    card = await next_of(ws, "chat.clarify")
+    assert await act(ws, "clarify", card["id"], "__other__") == "ok" and cg.AWAITING == ["q3"]
+
+
+async def test_approval_card_and_resolution(aiohttp_client, adapter):
+    ap = sys.modules["tools.approval"]
+    c, ws = await _platform_chat(aiohttp_client, adapter)
+    prompt = types.SimpleNamespace(chat_id="sb:conv-1", session_key="sk-1", text="Run `rm -rf build`?",
+                                   command="rm -rf build", description="recursive delete", smart_denied=False,
+                                   request_id="req-9", actions=[("Approve once", "once", "primary"),
+                                                                ("Always", "always", ""), ("Deny", "deny", "danger")])
+    r = await adapter._send_exec_approval_prompt(prompt)
+    assert r.success
+    card = await next_of(ws, "chat.approval")
+    assert card["command"] == "rm -rf build" and [a["choice"] for a in card["actions"]] == ["once", "always", "deny"]
+    assert await act(ws, "approval", card["id"], "sudo") == "bad_value"
+    r = await adapter._send_exec_approval_prompt(prompt)
+    card = await next_of(ws, "chat.approval")
+    assert await act(ws, "approval", card["id"], "once") == "ok"
+    assert ap.CALLS[-1] == ("sk-1", "once", "req-9", "owner")
+
+
+async def test_actions_limited_to_own_chat(aiohttp_client, adapter):
+    c, ws = await _platform_chat(aiohttp_client, adapter)
+    other, _ = await chat_client(c, name="other", caps=ALL_CAPS)
+    await adapter.send_choice_picker("sb:conv-1", "t", [{"value": "v", "label": "V"}], "sk", None)
+    card = await next_of(ws, "chat.choice")
+    await other.send_json({"type": "chat.send", "chat_id": "conv-1", "text": "x"})   # other's own conv-1
+    await next_of(other, "chat.accepted")
+    assert await act(other, "choice", card["id"], "v") == "expired"  # not this client's chat
