@@ -202,6 +202,11 @@ def _save_capture(image) -> dict:
         return {"image_error": "invalid base64"}
     if len(raw) > MAX_CAPTURE_BYTES:
         return {"image_error": f"image larger than {MAX_CAPTURE_BYTES // (1024 * 1024)} MB"}
+    # The declared type must match the bytes (they're handed to Hermes's vision tool).
+    magic = {".png": raw[:8] == b"\x89PNG\r\n\x1a\n", ".jpg": raw[:3] == b"\xff\xd8\xff",
+             ".webp": raw[:4] == b"RIFF" and raw[8:12] == b"WEBP"}
+    if not magic.get(ext, False):
+        return {"image_error": f"data is not a {mime} image"}
     home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
     folder = home / "plugin-data" / "outrigger" / "captures"
     folder.mkdir(parents=True, exist_ok=True)

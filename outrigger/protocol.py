@@ -1,6 +1,8 @@
 """Wire messages and validation for the outrigger control channel."""
 from __future__ import annotations
 
+import json
+
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -41,6 +43,9 @@ class ToolDecl:
         params = raw.get("parameters") or {"type": "object", "properties": {}}
         if not isinstance(params, dict):
             raise ProtocolError("bad_tool", f"parameters for {name} must be an object")
+        problem = check_schema(params)
+        if problem:
+            raise ProtocolError("bad_tool", f"parameters for {name}: {problem}")
         for key in ("timeout_s", "max_result_chars"):
             v = raw.get(key)
             if v is not None and (not isinstance(v, int) or isinstance(v, bool) or v <= 0):
@@ -69,6 +74,68 @@ def parse_tools(raw: Any, limit: int = 64) -> dict[str, ToolDecl]:
     return out
 
 
+MAX_SCHEMA_BYTES = 32_768
+MAX_SCHEMA_DEPTH = 24
+
+
+def _depth(obj: Any) -> int:
+    """Nesting depth of a JSON value, without recursion."""
+    deepest, stack = 0, [(obj, 1)]
+    while stack:
+        o, d = stack.pop()
+        deepest = max(deepest, d)
+        if d > MAX_SCHEMA_DEPTH:
+            return d
+        if isinstance(o, dict):
+            stack.extend((v, d + 1) for v in o.values())
+        elif isinstance(o, list):
+            stack.extend((v, d + 1) for v in o)
+    return deepest
+
+
+def check_schema(schema: dict) -> str | None:
+    """Why a client-declared parameter schema is refused, or None. Hermes's arguments are
+    validated against it on the gateway, so it must be small, shallow and regex-free where
+    a regex would run on the gateway (patternProperties); `pattern` is left to the client."""
+    if _depth(schema) > MAX_SCHEMA_DEPTH:
+        return f"nested deeper than {MAX_SCHEMA_DEPTH}"
+    try:
+        text = json.dumps(schema)
+    except (TypeError, ValueError, RecursionError):
+        return "not JSON"
+    if len(text) > MAX_SCHEMA_BYTES:
+        return f"larger than {MAX_SCHEMA_BYTES} bytes"
+    if '"patternProperties"' in text:
+        return "patternProperties is not supported"
+    try:
+        import jsonschema
+        _validator_cls().check_schema(schema)
+    except ImportError:
+        pass
+    except jsonschema.SchemaError as e:
+        return f"invalid JSON Schema: {e.message[:200]}"
+    except RecursionError:
+        return "invalid JSON Schema (recursive)"
+    return None
+
+
+_VALIDATOR = None
+
+
+def _validator_cls():
+    """Draft 2020-12 without `pattern`: Python's re has no timeout, so a hostile pattern
+    (catastrophic backtracking) could pin a gateway thread. The client validates its own
+    input; `pattern` still reaches the model in the schema."""
+    global _VALIDATOR
+    if _VALIDATOR is None:
+        from jsonschema import Draft202012Validator, validators
+        checks = {k: v for k, v in Draft202012Validator.VALIDATORS.items() if k != "pattern"}
+        _VALIDATOR = validators.create(meta_schema=Draft202012Validator.META_SCHEMA, validators=checks,
+                                       type_checker=Draft202012Validator.TYPE_CHECKER,
+                                       format_checker=None, version="outrigger-2020-12")
+    return _VALIDATOR
+
+
 def validate_args(schema: dict, args: Any) -> str | None:
     """Return an error string, or None if args satisfy the JSON Schema."""
     try:
@@ -76,12 +143,12 @@ def validate_args(schema: dict, args: Any) -> str | None:
     except ImportError:
         return _minimal_validate(schema, args)
     try:
-        jsonschema.validate(args, schema)
-    except jsonschema.ValidationError as e:
-        return e.message
+        err = jsonschema.exceptions.best_match(_validator_cls()(schema).iter_errors(args))
     except jsonschema.SchemaError as e:
         return f"tool declares an invalid schema: {e.message}"
-    return None
+    except Exception:  # untrusted schema: recursion, unresolvable $ref, anything else
+        return "tool schema could not be evaluated (recursive or unresolvable $ref?)"
+    return err.message if err is not None else None
 
 
 _PY_TYPES = {
@@ -140,6 +207,25 @@ def _minimal_validate(schema: dict, args: Any, path: str = "args") -> str | None
 
 
 _WS_RE = re.compile(r"\s+")
+
+
+def int_field(value: Any, name: str, lo: int, hi: int, default: int | None = None) -> int:
+    """A client-supplied integer in [lo, hi], or ProtocolError. Rejects bools, floats,
+    strings and out-of-range values (no int("NaN") surprises, no 10**30 line numbers)."""
+    if value is None and default is not None:
+        return default
+    if not isinstance(value, int) or isinstance(value, bool) or not (lo <= value <= hi):
+        raise ProtocolError("bad_field", f"{name} must be an integer {lo}..{hi}")
+    return value
+
+
+def str_field(value: Any, name: str, max_len: int, default: str | None = None) -> str:
+    """A client-supplied string of at most max_len characters, or ProtocolError."""
+    if value is None and default is not None:
+        return default
+    if not isinstance(value, str) or len(value) > max_len:
+        raise ProtocolError("bad_field", f"{name} must be a string of at most {max_len} characters")
+    return value
 
 
 def one_line(text: Any, limit: int) -> str:

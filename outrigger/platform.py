@@ -28,6 +28,8 @@ log = logging.getLogger("hermes.plugins.outrigger")
 
 PLATFORM = "outrigger"
 OUTBOX_MAX = 50  # replies kept per chat while its client is away
+OUTBOX_CHATS_MAX = 500  # chats with queued replies, overall (oldest dropped first)
+MAX_CHATS_PER_CLIENT = 256  # chats one connection may route at once
 # The platform's home channel: where cron results and cross-platform messages for
 # Outrigger go. Shared by the owner's clients (any of them may attach it).
 HOME = "home"
@@ -123,6 +125,9 @@ def toolsets_for_user(user_id: str) -> list[str] | None:
 def attach(client: Client, local: str) -> str:
     """Route a chat to this client (latest wins, e.g. after a reconnect)."""
     key = chat_key(client, local)
+    if CHATS.get(key) is not client and sum(1 for c in CHATS.values() if c is client) >= MAX_CHATS_PER_CLIENT:
+        from .protocol import ProtocolError
+        raise ProtocolError("too_many_chats", f"at most {MAX_CHATS_PER_CLIENT} chats per connection")
     CHATS[key] = client
     return key
 
@@ -189,6 +194,8 @@ def _make_adapter_class():
                 msg = {**msg, "chat_id": local_id(client, chat_id)}
                 if await _send_frame(client, msg):
                     return True
+            if chat_id not in OUTBOX and len(OUTBOX) >= OUTBOX_CHATS_MAX:
+                OUTBOX.pop(next(iter(OUTBOX)), None)  # drop the oldest chat's queue
             box = OUTBOX.setdefault(chat_id, deque(maxlen=OUTBOX_MAX))
             box.append(msg)
             return False
@@ -274,7 +281,9 @@ def _make_adapter_class():
                 return "expired"
             PENDING.pop(pid, None)
             if kind == "model":
-                if not isinstance(value, dict) or not value.get("model") or not value.get("provider"):
+                if (not isinstance(value, dict) or not isinstance(value.get("model"), str)
+                        or not isinstance(value.get("provider"), str) or not value["model"] or not value["provider"]
+                        or len(value["model"]) > 200 or len(value["provider"]) > 100):
                     return "bad_value"
                 text = await p["callback"](key, str(value["model"]), str(value["provider"]))
                 if text:

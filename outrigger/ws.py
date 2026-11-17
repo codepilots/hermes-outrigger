@@ -12,7 +12,7 @@ import time
 from aiohttp import WSMsgType, web
 
 from . import events, notebook, platform, settings, tokens
-from .protocol import PROTOCOL_VERSION, SUPPORTED_PROTOCOLS, ProtocolError, one_line, parse_tools
+from .protocol import PROTOCOL_VERSION, SUPPORTED_PROTOCOLS, ProtocolError, int_field, one_line, parse_tools, str_field
 from .registry import REGISTRY, Client
 
 log = logging.getLogger("hermes.plugins.outrigger")
@@ -105,7 +105,9 @@ def authorize(request: web.Request) -> web.Response | None:
         log.warning("outrigger: refused the API key from remote client %s (owner_key_remote is off; use a paired token)",
                     _peer(request))
         return web.json_response({"error": "forbidden"}, status=403)
-    if not hmac.compare_digest(_presented_key(request).encode(), key.encode()):
+    # surrogateescape: a header with undecodable bytes must fail the comparison, not raise.
+    if not hmac.compare_digest(_presented_key(request).encode("utf-8", "surrogateescape"),
+                               key.encode("utf-8", "surrogateescape")):
         log.warning("outrigger: bad or missing key from %s", _peer(request))
         return web.json_response({"error": "unauthorized"}, status=401)
     return None
@@ -220,6 +222,14 @@ async def ws_handler(request: web.Request) -> web.StreamResponse:
             except ProtocolError as e:
                 log.info("outrigger: client %s protocol error %s", client.id, e.code)
                 await _err(ws, e.code, e.message)
+            except (ConnectionError, asyncio.CancelledError):
+                raise
+            except Exception:
+                # Safety net: a message we failed to validate must not drop the connection
+                # (or take anything else down). Logged as an error so tests catch it.
+                log.exception("outrigger: client %s: unexpected error handling a %r message",
+                              client.id, one_line(m.get("type"), 40))
+                await _err(ws, "internal_error", "the server could not handle that message")
     finally:
         ka.cancel()
         if client is not None:
@@ -236,10 +246,19 @@ def _decode(raw) -> dict | None:
     if raw.type != WSMsgType.TEXT:
         return None
     try:
-        data = json.loads(raw.data)
-    except ValueError:
+        # NaN/Infinity literals are not JSON; deep nesting raises RecursionError.
+        data = json.loads(raw.data, parse_constant=_no_constant)
+        # JSON escapes can produce lone UTF-16 surrogates ("\ud800"), which aren't valid
+        # Unicode text: they'd fail later when written to a note or sent to the model
+        # provider. Reject the whole message here, once, for every field.
+        json.dumps(data, ensure_ascii=False).encode("utf-8")
+    except (ValueError, RecursionError, UnicodeError):
         return None
     return data if isinstance(data, dict) else None
+
+
+def _no_constant(name):
+    raise ValueError(f"{name} is not valid JSON")
 
 
 def _register(msg: dict, ws, loop, principal: dict | None = None) -> Client:
@@ -341,8 +360,11 @@ async def _handle_doc(client: Client, t: str, m: dict, ws) -> None:
     doc_id = m.get("doc_id")
     try:
         if t == "doc.list":
+            root = str_field(m.get("root"), "root", 64, default="") or None
+            query = str_field(m.get("query"), "query", 200, default="")
+            limit = int_field(m.get("limit"), "limit", 1, notebook.LIST_LIMIT, default=50)
             await ws.send_json({"type": "doc.list", "roots": sorted(allowed),
-                                "notes": notebook.listing(m.get("root"), str(m.get("query") or ""), m.get("limit") or 50, allowed)})
+                                "notes": notebook.listing(root, query, limit, allowed)})
         elif t == "doc.open":
             doc = notebook.open_doc(str(m.get("root") or ""), str(m.get("path") or ""), client, allowed)
             notebook.ensure_watcher()
@@ -373,12 +395,18 @@ async def _handle_doc(client: Client, t: str, m: dict, ws) -> None:
             _rate_check(client)
             sel = m.get("selection")
             selection = None
-            if isinstance(sel, dict):
-                try:
-                    selection = (int(sel["from_line"]), int(sel["to_line"]))
-                except (KeyError, TypeError, ValueError):
+            if sel is not None:
+                if not isinstance(sel, dict):
                     raise notebook.NotebookError("bad_selection", "selection: {from_line, to_line}")
-            line = None if selection else int(m.get("line") or 0)
+                try:
+                    selection = (int_field(sel.get("from_line"), "selection.from_line", 1, 10**6),
+                                 int_field(sel.get("to_line"), "selection.to_line", 1, 10**6))
+                except ProtocolError as e:
+                    raise notebook.NotebookError("bad_selection", e.message)
+            try:
+                line = None if selection else int_field(m.get("line"), "line", 1, 10**6)
+            except ProtocolError as e:
+                raise notebook.NotebookError("bad_line", e.message)
             lock = notebook.start_command(doc, client, str(m.get("base_version")), line, instruction, selection)
             local = notebook.note_chat_id(doc)
             key = platform.chat_key(client, local)
@@ -415,6 +443,8 @@ def _parse_redaction(raw) -> dict | None:
 
 async def _handle(client: Client, m: dict, ws) -> None:
     t = m.get("type")
+    if not isinstance(t, str) or len(t) > 40:
+        raise ProtocolError("bad_message", "type must be a short string")
     if t == "pong":
         return
     if t == "bind" and client.principal.get("kind") != "owner":
