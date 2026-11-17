@@ -11,7 +11,7 @@ import time
 
 from aiohttp import WSMsgType, web
 
-from . import events, platform, settings
+from . import events, platform, settings, tokens
 from .protocol import PROTOCOL_VERSION, SUPPORTED_PROTOCOLS, ProtocolError, one_line, parse_tools
 from .registry import REGISTRY, Client
 
@@ -47,8 +47,26 @@ def _is_loopback(request: web.Request) -> bool:
         return False
 
 
+OWNER = {"kind": "owner"}
+
+
+def authenticate(request: web.Request) -> tuple[web.Response | None, dict | None]:
+    """(refusal, principal). The principal is the owner (API key or, with no key set,
+    loopback) or a paired client token's user. Never logs headers or keys."""
+    presented = _presented_key(request)
+    loopback = _is_loopback(request)
+    rec = tokens.verify(presented) if presented.startswith("otr_") else None
+    if rec is not None:
+        if not loopback and not settings.get("allow_remote"):
+            log.warning("outrigger: refused non-loopback peer %s (allow_remote is off)", request.remote)
+            return web.json_response({"error": "forbidden"}, status=403), None
+        return None, {"kind": "token", **rec}
+    refusal = authorize(request)
+    return refusal, (None if refusal is not None else OWNER)
+
+
 def authorize(request: web.Request) -> web.Response | None:
-    """None if allowed. Never logs headers or the key."""
+    """None if allowed as the owner. Never logs headers or the key."""
     key = _expected_key()
     loopback = _is_loopback(request)
     if not key:
@@ -87,7 +105,7 @@ async def _err(ws, code: str, message: str, close: bool = False) -> None:
 
 
 async def ws_handler(request: web.Request) -> web.StreamResponse:
-    denied = authorize(request)
+    denied, principal = authenticate(request)
     if denied is not None:
         return denied
     ws = web.WebSocketResponse(protocols=(SUBPROTOCOL,), max_msg_size=MAX_MSG)
@@ -99,6 +117,10 @@ async def ws_handler(request: web.Request) -> web.StreamResponse:
     async def keepalive():
         while not ws.closed:
             await asyncio.sleep(PING_INTERVAL)
+            if principal.get("kind") == "token" and not tokens.is_active(principal["id"]):
+                log.info("outrigger: token %s revoked; closing", principal["id"])
+                await ws.close(code=4401, message=b"token revoked")
+                return
             if time.monotonic() - last_seen > DEAD_AFTER:
                 log.info("outrigger: client %s missed pings; dropping", client.id if client else "?")
                 await ws.close()
@@ -121,7 +143,7 @@ async def ws_handler(request: web.Request) -> web.StreamResponse:
             await _err(ws, "bad_hello", "first message must be hello", close=True)
             return ws
         try:
-            client = _register(msg, ws, loop)
+            client = _register(msg, ws, loop, principal)
         except ProtocolError as e:
             await _err(ws, e.code, e.message, close=True)
             return ws
@@ -164,7 +186,8 @@ def _decode(raw) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-def _register(msg: dict, ws, loop) -> Client:
+def _register(msg: dict, ws, loop, principal: dict | None = None) -> Client:
+    principal = principal or OWNER
     if msg.get("protocol") not in SUPPORTED_PROTOCOLS:
         raise ProtocolError("bad_protocol", f"supported protocols: {sorted(SUPPORTED_PROTOCOLS)}")
     info = msg.get("client")
@@ -184,9 +207,12 @@ def _register(msg: dict, ws, loop) -> Client:
     client = Client(
         name=name, label=one_line(info.get("label", ""), 120),
         kind=one_line(info.get("kind", ""), 64), version=one_line(info.get("version", ""), 32),
-        ws=ws, loop=loop, session_id=session_id or None, tools=parse_tools(msg.get("tools")),
+        # Token clients serve only their own platform chats, never API sessions (the owner's).
+        ws=ws, loop=loop, session_id=(session_id or None) if principal["kind"] == "owner" else None,
+        tools=parse_tools(msg.get("tools")),
         concurrency=concurrency,
     )
+    client.principal = principal
     client.redaction = _parse_redaction(msg.get("redaction"))
     caps = msg.get("capabilities")
     client.capabilities = {one_line(c, 32) for c in caps[:32] if isinstance(c, str)} if isinstance(caps, list) else set()
@@ -258,6 +284,8 @@ async def _handle(client: Client, m: dict, ws) -> None:
     t = m.get("type")
     if t == "pong":
         return
+    if t == "bind" and client.principal.get("kind") != "owner":
+        raise ProtocolError("not_allowed", "token clients chat through the Outrigger platform; session binding is for the owner")
     if t == "bind":
         sid = m.get("session_id")
         if not isinstance(sid, str) or not sid:

@@ -28,6 +28,13 @@ Discord. See docs/platform.md. Streaming follows Hermes's global `streaming`
 setting. The `/` autocomplete list is generated from Hermes's docs; after
 upgrading Hermes, run `python tools/gen_command_catalog.py`.
 
+**Other devices or people** get their own client token instead of the API key:
+`hermes outrigger pair --user <id> [--label phone] [--admin]` (shown once),
+`hermes outrigger tokens`, `hermes outrigger revoke <id>`. A token client chats
+only through the Outrigger platform, as its own user. Non-admin users can run the
+slash commands in the `user_allowed_commands` setting, plus `/help` and `/whoami`.
+For a gateway on another machine, also set `allow_remote: true`.
+
 `outrigger_call` is offered in every session once the toolset is enabled, so a
 client can attach before or after the conversation starts; with no client
 attached, calls fail fast.

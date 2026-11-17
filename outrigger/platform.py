@@ -68,15 +68,43 @@ def _new_prompt(kind: str, chat: str, **data) -> str:
     return pid
 
 
+def _prefix(client: Client) -> str:
+    """Chat namespace: the owner's clients by name; token clients also by token, so two
+    users' clients with the same name never share (or hijack) a chat."""
+    p = client.principal
+    return f"{client.name}:" if p.get("kind") == "owner" else f"t-{p['id']}:{client.name}:"
+
+
 def chat_key(client: Client, local_id: str) -> str:
-    return HOME if local_id == HOME else f"{client.name}:{local_id}"
+    # The shared home chat (cron results etc.) belongs to the owner.
+    if local_id == HOME and client.principal.get("kind") == "owner":
+        return HOME
+    return _prefix(client) + local_id
 
 
 def local_id(client: Client, key: str) -> str:
     if key == HOME:
         return HOME
-    prefix = client.name + ":"
+    prefix = _prefix(client)
     return key[len(prefix):] if key.startswith(prefix) else key
+
+
+def user_of(client: Client) -> tuple[str, str | None]:
+    p = client.principal
+    if p.get("kind") == "token":
+        return p["user_id"], (p.get("user_name") or None)
+    return str(settings.get("platform_owner_id") or "owner"), (settings.get("platform_owner_name") or None)
+
+
+def access_extra() -> dict:
+    """Hermes's own per-platform access lists (gateway allowlist and slash-command gating),
+    kept in step with the token store: the owner and admin tokens get every command; other
+    paired users get user_allowed_commands (plus Hermes's /help and /whoami floor)."""
+    from . import tokens
+    owner = str(settings.get("platform_owner_id") or "owner")
+    users, admins = tokens.active_users()
+    return {"allow_from": sorted({owner} | users), "allow_admin_from": sorted({owner} | admins),
+            "user_allowed_commands": [str(c) for c in settings.get("user_allowed_commands")]}
 
 
 def attach(client: Client, local: str) -> str:
@@ -130,6 +158,7 @@ def _make_adapter_class():
             global ADAPTER
             self._loop = asyncio.get_running_loop()
             ADAPTER = self
+            self.sync_access()
             self._mark_connected()
             log.info("outrigger: platform adapter connected")
             return True
@@ -264,7 +293,7 @@ def _make_adapter_class():
                     return "bad_value"
                 n = resolve_gateway_approval_card(
                     p["session_key"], str(value), p["request_id"],
-                    actor_id=settings.get("platform_owner_id"), extra=getattr(self.config, "extra", None))
+                    actor_id=user_of(client)[0], extra=getattr(self.config, "extra", None))
                 return "ok" if n else "expired"
             return "bad_kind"
 
@@ -308,14 +337,20 @@ def _make_adapter_class():
             return {"name": f"{client.label or client.name}" if client else chat_id,
                     "type": "dm", "chat_id": chat_id}
 
+        def sync_access(self) -> None:
+            """Update this platform's live config extra (the gateway reads the same object)."""
+            extra = getattr(self.config, "extra", None)
+            if isinstance(extra, dict):
+                extra.update(access_extra())
+
         # ---- inbound (from the websocket route)
         async def receive(self, client: Client, local: str, text: str, message_id: str) -> None:
+            self.sync_access()  # pairing/revoking takes effect without a restart
             key = attach(client, local)
+            user_id, user_name = user_of(client)
             source = self.build_source(
                 chat_id=key, chat_name=client.label or client.name, chat_type="dm",
-                user_id=settings.get("platform_owner_id"),
-                user_name=settings.get("platform_owner_name") or None,
-                message_id=message_id,
+                user_id=user_id, user_name=user_name, message_id=message_id,
             )
             event = MessageEvent(text=text, message_type=MessageType.TEXT, source=source,
                                  message_id=message_id)
@@ -388,7 +423,7 @@ def register(ctx) -> bool:
         # is the owner, authorized through the adapter's own allow list.
         # A home channel also stops the gateway's one-time "no home channel" prompt that
         # would otherwise open every new conversation.
-        "env_enablement_fn": lambda: {"allow_from": [owner],
+        "env_enablement_fn": lambda: {**access_extra(),
                                       "home_channel": {"chat_id": HOME, "name": "Outrigger home"}},
         # Streaming follows the global `streaming` switch (a platform can only narrow it).
         "display_tier": "medium",

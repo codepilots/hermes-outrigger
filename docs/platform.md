@@ -1,7 +1,7 @@
 # Outrigger platform: a messaging platform for outrigger clients
 
-Date: 2026-11-16. Status: **P1-P3 implemented** (2026-11-17,
-`outrigger/platform.py`; the sidebar uses them); P4 (identities) proposed. Open questions answered against the Hermes
+Date: 2026-11-16. Status: **P1-P4 implemented** (2026-11-17,
+`outrigger/platform.py`, `outrigger/tokens.py`; the sidebar uses them). Open questions answered against the Hermes
 v0.23.1 source (section 5). Extends spec.md (protocol v1) and replaces phase 2
 of the sidebar's proposal 13.
 
@@ -286,6 +286,42 @@ P1 as built, beyond the plan:
   - A client tool was called on a platform turn with the client bound to no
     session, found purely from `HERMES_SESSION_CHAT_ID` (answer 2 confirmed).
   - The sidebar asked about the open page and Hermes used `get_page`.
+
+P4 as built:
+- **Tokens.** `hermes outrigger pair --user ID [--name] [--label] [--admin]`
+  (`ctx.register_cli_command`) mints a token `otr_<id>_<secret>`. It is shown
+  once and stored as a SHA-256 hash in `plugin-data/outrigger/tokens.json`
+  (0600). `hermes outrigger tokens` lists them and `revoke ID` revokes one. The
+  gateway re-reads the file when it changes, so no restart is needed.
+- **Authentication.** The WebSocket accepts the API key (the owner) or a token
+  (its user). Token clients are still subject to `allow_remote` for non-loopback
+  peers.
+- **Restrictions on token clients:**
+  - no API-session binding (`hello.session_id` is ignored and `bind` is refused);
+  - chats are namespaced `t-<token id>:<client>:<chat>`, so two users' clients
+    with the same name can't share or hijack a chat;
+  - the owner's `home` chat isn't theirs;
+  - messages and approval answers carry the token's user id.
+- **Hermes's own access control.** The adapter keeps its live `config.extra` in
+  step with the store:
+  - `allow_from`: the owner plus active token users;
+  - `allow_admin_from`: the owner plus admin tokens;
+  - `user_allowed_commands`: plugin setting; the default leaves out `/model` and
+    `/reasoning`, whose `--global` rewrites config.yaml.
+
+  Hermes's slash gating (`gateway/slash_access.py`) and allowlist read that same
+  object, so a pairing or revocation applies on the next message.
+- **Revocation** closes the token's live connections (WebSocket close code 4401)
+  at the next keepalive tick.
+- **Live check, 2026-11-17:**
+  - A token minted after gateway start worked.
+  - `/whoami` showed "User ID: ann, Tier: user". `/model` was refused by Hermes
+    ("admin-only here"), and `/status` was allowed.
+  - `bind` was refused.
+  - Revoking closed the connection in 2 s.
+  - The owner stayed "Tier: admin, all available".
+  - The sidebar with a token: the options test connected, and `/whoami` in the
+    panel showed the token user.
 
 P3 as built:
 - **Command catalog.**

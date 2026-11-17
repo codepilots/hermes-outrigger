@@ -44,7 +44,8 @@ class Client:
     summary: str = ""
     concurrency: int = 1
     redaction: dict | None = None
-    capabilities: set = field(default_factory=set)  # hello.capabilities, e.g. {"chat"}  # {"enabled": True, "categories": [...]} when the client redacts
+    capabilities: set = field(default_factory=set)  # hello.capabilities, e.g. {"chat"}
+    principal: dict = field(default_factory=lambda: {"kind": "owner"})  # owner, or a paired token's user  # {"enabled": True, "categories": [...]} when the client redacts
     pending: dict[str, Pending] = field(default_factory=dict)
     connected_at: float = field(default_factory=time.time)
     closed: bool = False
@@ -82,7 +83,7 @@ class Registry:
         with self._lock:
             replaced = None
             for c in list(self.clients.values()):
-                if c.name == client.name and c.session_id == client.session_id:
+                if c.name == client.name and c.session_id == client.session_id and c.principal == client.principal:
                     replaced = c
                     self._drop_locked(c, "outrigger_replaced")
             if len(self.clients) >= MAX_CLIENTS:

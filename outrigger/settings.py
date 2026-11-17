@@ -18,7 +18,11 @@ DEFAULTS = {
     "review_deny": "ask",
     "platform": True,  # register the Outrigger messaging platform (needs a gateway restart)
     "platform_owner_id": "owner",  # user id for chats from key-authenticated clients
-    "platform_owner_name": "",  # ask: a deny goes to the user as a flagged prompt; block: final  # extra trusted rules appended to the reviewer prompt
+    "platform_owner_name": "",
+    # Slash commands paired (non-admin) token users may run, beyond Hermes's /help and /whoami.
+    # /model and /reasoning are left out: with --global they rewrite config.yaml.
+    "user_allowed_commands": ["status", "new", "stop", "retry", "undo", "title", "usage", "queue", "q",
+                              "btw", "save", "context", "commands", "sessions", "resume"],  # ask: a deny goes to the user as a flagged prompt; block: final  # extra trusted rules appended to the reviewer prompt
 }
 
 SETTINGS: dict = dict(DEFAULTS)

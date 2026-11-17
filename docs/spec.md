@@ -267,10 +267,13 @@ Threats, in order of weight:
    tool description; per-turn call cap (default 20 per client).
 2. Wrong client gets a call. Mitigation: strict session binding; no
    cross-session or cross-profile routing; client ids are random per connection.
-3. Key exposure. v1 reuses API_SERVER_KEY, which the client already stores for
-   chat. Passing it in the WS subprotocol header can end up in logs; the plugin
-   must not log handshake headers. v2: per-client tokens minted by
-   `hermes outrigger pair` with a scope of `outrigger` only.
+3. Key exposure. The owner's clients use API_SERVER_KEY, which they already store
+   for chat. Passing it in the WS subprotocol header can end up in logs; the
+   plugin never logs handshake headers. Other clients and people use per-client
+   tokens from `hermes outrigger pair` (done, see platform.md P4). A token only
+   opens the outrigger WebSocket, is limited to its own platform chats, carries
+   its own user id into Hermes's allowlist and slash gating, and can be revoked
+   without a restart.
 4. Gateway exposure. The gateway may listen beyond loopback (LAN, VPN, reverse
    proxy). The outrigger route inherits that exposure;
    settings flag `allow_remote: false` by default rejects non-loopback peers.
@@ -327,8 +330,8 @@ no middleware.
   Python. Done.
 - M2: Hermes Sidebar integration: get_page, run_js with confirm UI.
 - M3: multi-client, tools.update, context.update, audit log. Done.
-- M4: per-client pairing tokens; second client (see scenarios).
+- M4: per-client pairing tokens. Done 2026-11-17 (platform P4).
 - M5: Outrigger platform: clients become a Hermes messaging platform (slash
   commands, `/model` picker, approvals, clarify) over the same WebSocket. See
-  docs/platform.md. P1 (chat, slash commands), P2 (prompt cards) and P3 (autocomplete
-  catalog, media; history kept by clients) done 2026-11-17; P4 (identities) next.
+  docs/platform.md. P1-P4 done 2026-11-17 (chat and slash commands, prompt cards,
+  autocomplete/media, per-client tokens with Hermes's slash gating).

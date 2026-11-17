@@ -107,4 +107,8 @@ def register(ctx) -> None:
         ctx.register_platform_handler("api_server", _wire)
 
     platform.register(ctx)
+    if hasattr(ctx, "register_cli_command"):
+        from . import cli
+        ctx.register_cli_command(name="outrigger", help="Outrigger client tokens: pair, list, revoke",
+                                 setup_fn=cli.setup, handler_fn=cli.handle)
     ctx.on_unload(REGISTRY.close_all)

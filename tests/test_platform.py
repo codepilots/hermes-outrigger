@@ -145,8 +145,10 @@ def test_registration(adapter):
     r = adapter.registered
     assert r["name"] == "outrigger" and r["label"] == "Outrigger"
     assert r["is_connected"](None) is True
-    assert r["env_enablement_fn"]() == {"allow_from": ["owner"],
-                                        "home_channel": {"chat_id": "home", "name": "Outrigger home"}}
+    seed = r["env_enablement_fn"]()
+    assert seed["allow_from"] == ["owner"] and seed["allow_admin_from"] == ["owner"]
+    assert "new" in seed["user_allowed_commands"] and "model" not in seed["user_allowed_commands"]
+    assert seed["home_channel"] == {"chat_id": "home", "name": "Outrigger home"}
     assert r["display_tier"] == "medium" and "display_overrides" not in r
     assert r["max_message_length"] == 0
 
