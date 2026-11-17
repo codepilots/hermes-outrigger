@@ -25,7 +25,8 @@ The plugin also registers the **Outrigger platform** (on by default; setting
 `platform`): clients that declare the `chat` capability chat through Hermes's
 messaging pipeline, so slash commands such as `/model` and `/new` work as on
 Discord. See docs/platform.md. Streaming follows Hermes's global `streaming`
-setting.
+setting. The `/` autocomplete list is generated from Hermes's docs; after
+upgrading Hermes, run `python tools/gen_command_catalog.py`.
 
 `outrigger_call` is offered in every session once the toolset is enabled, so a
 client can attach before or after the conversation starts; with no client

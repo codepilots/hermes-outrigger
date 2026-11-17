@@ -1,0 +1,467 @@
+{
+ "source": "hermes docs: reference/slash-commands.md (Messaging slash commands)",
+ "hermes_version": "v0.23.1",
+ "commands": [
+  {
+   "name": "new",
+   "args_hint": "[name]",
+   "aliases": [
+    "reset"
+   ],
+   "description": "Start a new session (fresh session ID + history).",
+   "source": "builtin"
+  },
+  {
+   "name": "status",
+   "args_hint": "",
+   "aliases": [],
+   "description": "Show session info, followed by a local Session recap block (recent turn counts, top tools used, files touched, latest prompt + reply).",
+   "source": "builtin"
+  },
+  {
+   "name": "stop",
+   "args_hint": "",
+   "aliases": [],
+   "description": "Kill all running background processes and interrupt the running agent.",
+   "source": "builtin"
+  },
+  {
+   "name": "discard",
+   "args_hint": "",
+   "aliases": [],
+   "description": "Drop a turn Hermes lost in a restart so this chat's queued messages run again.",
+   "source": "builtin"
+  },
+  {
+   "name": "pause",
+   "args_hint": "[reason | off]",
+   "aliases": [],
+   "description": "Global emergency stop, the in-chat form of `hermes pause`: puts new cron, kanban and gateway work on hold until `/pause off`.",
+   "source": "builtin"
+  },
+  {
+   "name": "model",
+   "args_hint": "[provider:model]",
+   "aliases": [],
+   "description": "Show or change the model.",
+   "source": "builtin"
+  },
+  {
+   "name": "codex-runtime",
+   "args_hint": "[auto|codex_app_server|on|off]",
+   "aliases": [],
+   "description": "Toggle the optional Codex app-server runtime.",
+   "source": "builtin"
+  },
+  {
+   "name": "personality",
+   "args_hint": "[name]",
+   "aliases": [],
+   "description": "Set a personality overlay for the session.",
+   "source": "builtin"
+  },
+  {
+   "name": "fast",
+   "args_hint": "[normal|fast|auto|cold|status]",
+   "aliases": [],
+   "description": "Fast mode \u2014 OpenAI Priority Processing / Anthropic Fast Mode.",
+   "source": "builtin"
+  },
+  {
+   "name": "retry",
+   "args_hint": "",
+   "aliases": [],
+   "description": "Retry the last message.",
+   "source": "builtin"
+  },
+  {
+   "name": "undo",
+   "args_hint": "",
+   "aliases": [],
+   "description": "Remove the last exchange.",
+   "source": "builtin"
+  },
+  {
+   "name": "sethome",
+   "args_hint": "",
+   "aliases": [
+    "set-home"
+   ],
+   "description": "Mark the current chat as the platform home channel for deliveries.",
+   "source": "builtin"
+  },
+  {
+   "name": "compress",
+   "args_hint": "[here [N] | focus topic]",
+   "aliases": [],
+   "description": "Manually compress conversation context.",
+   "source": "builtin"
+  },
+  {
+   "name": "save",
+   "args_hint": "<json|md|html> [filename] [redact]",
+   "aliases": [],
+   "description": "Export the current session as JSON, Markdown, or HTML and send the file into the chat as a document.",
+   "source": "builtin"
+  },
+  {
+   "name": "title",
+   "args_hint": "[name]",
+   "aliases": [],
+   "description": "Set or show the session title.",
+   "source": "builtin"
+  },
+  {
+   "name": "resume",
+   "args_hint": "[name]",
+   "aliases": [],
+   "description": "Resume a previously named session.",
+   "source": "builtin"
+  },
+  {
+   "name": "sessions",
+   "args_hint": "[all] [search <query>]",
+   "aliases": [],
+   "description": "List previous sessions for this chat; the active session appears with a `(current)` marker.",
+   "source": "builtin"
+  },
+  {
+   "name": "usage",
+   "args_hint": "",
+   "aliases": [],
+   "description": "Show token usage, estimated cost breakdown (input/output), context window state, session duration, and \u2014 when available from the active provider \u2014 an Account li",
+   "source": "builtin"
+  },
+  {
+   "name": "topup",
+   "args_hint": "",
+   "aliases": [],
+   "description": "Show your Nous balance and manage billing on the portal.",
+   "source": "builtin"
+  },
+  {
+   "name": "whoami",
+   "args_hint": "",
+   "aliases": [],
+   "description": "Show your slash command access level (admin / user).",
+   "source": "builtin"
+  },
+  {
+   "name": "insights",
+   "args_hint": "[days]",
+   "aliases": [],
+   "description": "Show usage analytics.",
+   "source": "builtin"
+  },
+  {
+   "name": "reasoning",
+   "args_hint": "[level|show|hide|full|clamp] [--global]",
+   "aliases": [],
+   "description": "Change reasoning effort (levels up to `max` / `ultra`) or toggle reasoning display (`full` / `clamp` included).",
+   "source": "builtin"
+  },
+  {
+   "name": "voice",
+   "args_hint": "[on|off|tts|join|channel|leave|status]",
+   "aliases": [],
+   "description": "Control spoken replies in chat.",
+   "source": "builtin"
+  },
+  {
+   "name": "rollback",
+   "args_hint": "[number]",
+   "aliases": [],
+   "description": "List or restore filesystem checkpoints.",
+   "source": "builtin"
+  },
+  {
+   "name": "diff",
+   "args_hint": "[staged|all|session] [--stat]",
+   "aliases": [],
+   "description": "Show git changes in the working directory (fenced and truncated to platform message limits).",
+   "source": "builtin"
+  },
+  {
+   "name": "bg",
+   "args_hint": "<prompt>",
+   "aliases": [],
+   "description": "Run a prompt in a separate background session.",
+   "source": "builtin"
+  },
+  {
+   "name": "btw",
+   "args_hint": "<question>",
+   "aliases": [],
+   "description": "Ask a side question about the current conversation without interrupting it.",
+   "source": "builtin"
+  },
+  {
+   "name": "queue",
+   "args_hint": "<prompt>",
+   "aliases": [
+    "q"
+   ],
+   "description": "Queue a prompt for the next turn without interrupting the current one.",
+   "source": "builtin"
+  },
+  {
+   "name": "steer",
+   "args_hint": "<prompt>",
+   "aliases": [],
+   "description": "Inject a message after the next tool call without interrupting \u2014 the model picks it up on its next iteration rather than as a new turn.",
+   "source": "builtin"
+  },
+  {
+   "name": "goal",
+   "args_hint": "<text>",
+   "aliases": [],
+   "description": "Set a standing goal Hermes works toward across turns \u2014 our take on the Ralph loop.",
+   "source": "builtin"
+  },
+  {
+   "name": "subgoal",
+   "args_hint": "<text>",
+   "aliases": [],
+   "description": "Append criteria to the active `/goal` mid-loop (`/subgoal`, `/subgoal remove <N>`, `/subgoal clear`).",
+   "source": "builtin"
+  },
+  {
+   "name": "heartbeat",
+   "args_hint": "every <interval> <prompt>",
+   "aliases": [
+    "hb"
+   ],
+   "description": "Set a recurring prompt that re-enters this session when idle.",
+   "source": "builtin"
+  },
+  {
+   "name": "loop",
+   "args_hint": "[interval] <prompt> [--times N] [--until <condition>]",
+   "aliases": [
+    "proactive"
+   ],
+   "description": "Re-run a prompt on a recurring interval in this session.",
+   "source": "builtin"
+  },
+  {
+   "name": "refine",
+   "args_hint": "[focus]",
+   "aliases": [],
+   "description": "Run the memory/skill self-improvement review now, optionally with focus instructions.",
+   "source": "builtin"
+  },
+  {
+   "name": "review",
+   "args_hint": "[instructions]",
+   "aliases": [],
+   "description": "Spawn an independent reviewer subagent for the work just discussed (PR, code, docs); its review re-enters this chat when done.",
+   "source": "builtin"
+  },
+  {
+   "name": "moa",
+   "args_hint": "<prompt>",
+   "aliases": [],
+   "description": "Run one prompt through the default Mixture of Agents preset, then restore the session model.",
+   "source": "builtin"
+  },
+  {
+   "name": "branch",
+   "args_hint": "[--here] [name]",
+   "aliases": [
+    "fork"
+   ],
+   "description": "Branch the current session.",
+   "source": "builtin"
+  },
+  {
+   "name": "agents",
+   "args_hint": "",
+   "aliases": [
+    "tasks"
+   ],
+   "description": "Show active agents and running tasks.",
+   "source": "builtin"
+  },
+  {
+   "name": "context",
+   "args_hint": "[all]",
+   "aliases": [
+    "ctx"
+   ],
+   "description": "Context-window usage gauge and category breakdown (messaging-friendly text form).",
+   "source": "builtin"
+  },
+  {
+   "name": "egress",
+   "args_hint": "[status]",
+   "aliases": [],
+   "description": "Show Docker egress proxy status.",
+   "source": "builtin"
+  },
+  {
+   "name": "init",
+   "args_hint": "[notes]",
+   "aliases": [],
+   "description": "Generate or update `AGENTS.md` from a repo scan.",
+   "source": "builtin"
+  },
+  {
+   "name": "learn",
+   "args_hint": "<what to learn from>",
+   "aliases": [],
+   "description": "Distill a reusable skill from anything you describe.",
+   "source": "builtin"
+  },
+  {
+   "name": "plan",
+   "args_hint": "[task]",
+   "aliases": [],
+   "description": "Write a markdown implementation plan to `.hermes/plans/`; no execution.",
+   "source": "builtin"
+  },
+  {
+   "name": "bundles",
+   "args_hint": "",
+   "aliases": [],
+   "description": "List configured skill bundles (`/<name>` aliases that preload several skills).",
+   "source": "builtin"
+  },
+  {
+   "name": "reload-skills",
+   "args_hint": "",
+   "aliases": [
+    "reload_skills"
+   ],
+   "description": "Re-scan `~/.hermes/skills/` for newly installed or removed skills.",
+   "source": "builtin"
+  },
+  {
+   "name": "footer",
+   "args_hint": "[on|off|status]",
+   "aliases": [],
+   "description": "Toggle the runtime-metadata footer on final replies (shows model, context %, and cwd).",
+   "source": "builtin"
+  },
+  {
+   "name": "curator",
+   "args_hint": "[status|run|pin|archive]",
+   "aliases": [],
+   "description": "Background skill maintenance controls.",
+   "source": "builtin"
+  },
+  {
+   "name": "suggestions",
+   "args_hint": "[accept|dismiss N|catalog|clear]",
+   "aliases": [],
+   "description": "Review suggested automations right in chat.",
+   "source": "builtin"
+  },
+  {
+   "name": "blueprint",
+   "args_hint": "[name] [slot=value ...]",
+   "aliases": [],
+   "description": "Browse cron blueprints, start a guided slot-filling conversation, or create a blueprint job directly.",
+   "source": "builtin"
+  },
+  {
+   "name": "memory",
+   "args_hint": "[pending|approve|reject|approval]",
+   "aliases": [],
+   "description": "Review pending memory writes staged by the write-approval gate (`memory.write_approval`) \u2014 approve or reject them right in chat \u2014 and toggle the gate with `/mem",
+   "source": "builtin"
+  },
+  {
+   "name": "skills",
+   "args_hint": "[pending|approve|reject|diff|approval]",
+   "aliases": [],
+   "description": "Review pending skill writes staged by the write-approval gate (`skills.write_approval`).",
+   "source": "builtin"
+  },
+  {
+   "name": "kanban",
+   "args_hint": "<action>",
+   "aliases": [],
+   "description": "Drive the multi-profile, multi-project collaboration board from chat \u2014 identical argument surface to the CLI.",
+   "source": "builtin"
+  },
+  {
+   "name": "platform",
+   "args_hint": "<list|pause|resume> [name]",
+   "aliases": [],
+   "description": "Operate a running gateway platform right from chat.",
+   "source": "builtin"
+  },
+  {
+   "name": "reload-mcp",
+   "args_hint": "",
+   "aliases": [
+    "reload_mcp"
+   ],
+   "description": "Reload MCP servers from config and re-probe tool availability.",
+   "source": "builtin"
+  },
+  {
+   "name": "verbose",
+   "args_hint": "",
+   "aliases": [],
+   "description": "Cycle tool progress display.",
+   "source": "builtin"
+  },
+  {
+   "name": "yolo",
+   "args_hint": "",
+   "aliases": [],
+   "description": "Toggle YOLO mode \u2014 skip all dangerous command approval prompts.",
+   "source": "builtin"
+  },
+  {
+   "name": "commands",
+   "args_hint": "[page]",
+   "aliases": [],
+   "description": "Browse all commands and skills (paginated).",
+   "source": "builtin"
+  },
+  {
+   "name": "approve",
+   "args_hint": "[session|always]",
+   "aliases": [],
+   "description": "Approve and execute a pending dangerous command.",
+   "source": "builtin"
+  },
+  {
+   "name": "deny",
+   "args_hint": "",
+   "aliases": [],
+   "description": "Reject a pending dangerous command.",
+   "source": "builtin"
+  },
+  {
+   "name": "update",
+   "args_hint": "",
+   "aliases": [],
+   "description": "Update Hermes Agent to the latest version.",
+   "source": "builtin"
+  },
+  {
+   "name": "restart",
+   "args_hint": "",
+   "aliases": [],
+   "description": "Gracefully restart the gateway after draining active runs.",
+   "source": "builtin"
+  },
+  {
+   "name": "debug",
+   "args_hint": "",
+   "aliases": [],
+   "description": "Upload debug report (system info + logs) and get shareable links.",
+   "source": "builtin"
+  },
+  {
+   "name": "help",
+   "args_hint": "",
+   "aliases": [],
+   "description": "Show messaging help.",
+   "source": "builtin"
+  }
+ ]
+}

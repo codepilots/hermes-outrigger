@@ -179,6 +179,7 @@ Client to server:
 | `chat.send` | `chat_id`, `text`, `client_msg_id?` | protocol 2, `chat` capability: a message (or slash command) to the Outrigger platform; see docs/platform.md |
 | `chat.attach` | `chat_id` | route a chat to this client and deliver its outbox (after a reconnect; `home` is the platform's shared home chat) |
 | `chat.stop` | `chat_id` | `/stop` for a chat this client owns |
+| `chat.commands` | | the platform's command catalog (build-time; see docs/platform.md) for autocomplete |
 | `chat.action` | `chat_id`, `kind` (`model`/`choice`/`clarify`/`approval`), `id`, `value` | answer a prompt card (docs/platform.md) |
 | `progress` | `call_id`, `message` | optional; sent to the session's viewers as event `plugin.outrigger.progress` via `ctx.emit_to_session`, and the last one is included in a timeout error |
 | `pong` | | keepalive reply |
@@ -189,6 +190,8 @@ Server to client:
 |---|---|---|
 | `welcome` | `client_id`, `session_id?`, `limits`, `platform?` | accepted; `platform: {name, available}` when the client declared `chat` |
 | `chat.accepted` / `chat.message` / `chat.edit` / `chat.typing` | `chat_id`, … | Outrigger platform frames (docs/platform.md) |
+| `chat.commands` | `commands: [{name, args_hint, aliases, description}]`, `hermes_version` | reply to `chat.commands` |
+| `chat.media` | `chat_id`, `message_id`, `kind` (`image`/`file`), `url` or `name`+`mime`+`data` (base64), `caption` | images and files Hermes sends, for clients with the `media` capability |
 | `chat.model_picker` / `chat.choice` / `chat.clarify` / `chat.approval` | `chat_id`, `id`, … | prompt cards for clients with the matching capability; answered with `chat.action`, acknowledged by `chat.action_result` |
 | `call` | `call_id`, `tool`, `args`, `deadline_ms`, `turn_id` | run a tool |
 | `cancel` | `call_id`, `reason` | turn interrupted or timed out |
@@ -327,5 +330,5 @@ no middleware.
 - M4: per-client pairing tokens; second client (see scenarios).
 - M5: Outrigger platform: clients become a Hermes messaging platform (slash
   commands, `/model` picker, approvals, clarify) over the same WebSocket. See
-  docs/platform.md. P1 (chat, slash commands) and P2 (model picker, choices, clarify,
-  approvals as cards) done 2026-11-17; P3-P4 next.
+  docs/platform.md. P1 (chat, slash commands), P2 (prompt cards) and P3 (autocomplete
+  catalog, media; history kept by clients) done 2026-11-17; P4 (identities) next.

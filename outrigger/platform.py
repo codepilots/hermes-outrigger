@@ -12,8 +12,11 @@ gateway.config (public plugin API).
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
+import mimetypes
+import os
 import secrets
 import time
 from collections import deque
@@ -39,6 +42,21 @@ ADAPTER = None  # the live adapter, set on connect
 PENDING: dict[str, dict] = {}
 PENDING_TTL = 15 * 60
 MAX_PICKER_MODELS = 50
+MAX_MEDIA_BYTES = 5 * 1024 * 1024  # files Hermes sends are inlined up to this size
+_CATALOG = None
+
+
+def command_catalog() -> dict:
+    """Build-time command list (tools/gen_command_catalog.py); see NousResearch/hermes-agent#149673."""
+    global _CATALOG
+    if _CATALOG is None:
+        path = os.path.join(os.path.dirname(__file__), "data", "commands.json")
+        try:
+            with open(path, encoding="utf-8") as f:
+                _CATALOG = json.load(f)
+        except (OSError, ValueError):
+            _CATALOG = {"commands": [], "source": "unavailable"}
+    return _CATALOG
 
 
 def _new_prompt(kind: str, chat: str, **data) -> str:
@@ -249,6 +267,41 @@ def _make_adapter_class():
                     actor_id=settings.get("platform_owner_id"), extra=getattr(self.config, "extra", None))
                 return "ok" if n else "expired"
             return "bad_kind"
+
+        # ---- media (P3): images and files Hermes sends, for clients with "media"
+        async def send_image(self, chat_id, image_url, caption=None, reply_to=None, metadata=None):
+            if not self._supports(chat_id, "media") or not str(image_url).startswith(("https://", "http://")):
+                return await super().send_image(chat_id, image_url, caption, reply_to, metadata)
+            mid = "om_" + secrets.token_hex(6)
+            await self._deliver(chat_id, {"type": "chat.media", "message_id": mid, "kind": "image",
+                                          "url": str(image_url), "caption": caption or ""})
+            return SendResult(success=True, message_id=mid)
+
+        async def _send_file(self, chat_id, path, kind, caption, file_name, reply_to, metadata, fallback):
+            if not self._supports(chat_id, "media"):
+                return await fallback()
+            safe = self.validate_media_delivery_path(path)  # Hermes's own media path checks
+            if not safe or not os.path.isfile(safe) or os.path.getsize(safe) > MAX_MEDIA_BYTES:
+                return await fallback()
+            with open(safe, "rb") as f:
+                data = base64.b64encode(f.read()).decode("ascii")
+            name = file_name or os.path.basename(safe)
+            mid = "om_" + secrets.token_hex(6)
+            await self._deliver(chat_id, {"type": "chat.media", "message_id": mid, "kind": kind, "name": name,
+                                          "mime": mimetypes.guess_type(name)[0] or "application/octet-stream",
+                                          "data": data, "caption": caption or ""})
+            return SendResult(success=True, message_id=mid)
+
+        async def send_image_file(self, chat_id, image_path, caption=None, reply_to=None, metadata=None, **kwargs):
+            return await self._send_file(chat_id, image_path, "image", caption, None, reply_to, metadata,
+                                         lambda: super(OutriggerAdapter, self).send_image_file(
+                                             chat_id, image_path, caption, reply_to, metadata, **kwargs))
+
+        async def send_document(self, chat_id, file_path, caption=None, file_name=None, reply_to=None,
+                                metadata=None, **kwargs):
+            return await self._send_file(chat_id, file_path, "file", caption, file_name, reply_to, metadata,
+                                         lambda: super(OutriggerAdapter, self).send_document(
+                                             chat_id, file_path, caption, file_name, reply_to, metadata, **kwargs))
 
         async def get_chat_info(self, chat_id):
             client = client_for_chat(chat_id)

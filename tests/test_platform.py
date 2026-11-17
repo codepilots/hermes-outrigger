@@ -396,3 +396,36 @@ async def test_actions_limited_to_own_chat(aiohttp_client, adapter):
     await other.send_json({"type": "chat.send", "chat_id": "conv-1", "text": "x"})   # other's own conv-1
     await next_of(other, "chat.accepted")
     assert await act(other, "choice", card["id"], "v") == "expired"  # not this client's chat
+
+
+async def test_command_catalog(aiohttp_client, adapter):
+    c = await start(aiohttp_client)
+    ws, _ = await chat_client(c)
+    await ws.send_json({"type": "chat.commands"})
+    m = await next_of(ws, "chat.commands")
+    names = {x["name"] for x in m["commands"]}
+    assert {"model", "new", "reasoning", "stop", "help"} <= names and "start" not in names
+    model = next(x for x in m["commands"] if x["name"] == "model")
+    assert model["args_hint"] == "[provider:model]" and model["description"]
+
+
+async def test_media_files_and_images(aiohttp_client, adapter, tmp_path):
+    c, ws = await _platform_chat(aiohttp_client, adapter, caps=ALL_CAPS + ("media",))
+    adapter.validate_media_delivery_path = lambda p: p          # stand-in for Hermes's path check
+    f = tmp_path / "report.csv"; f.write_text("a,b\n1,2\n")
+    r = await adapter.send_document("sb:conv-1", str(f), caption="Here you go")
+    m = await next_of(ws, "chat.media")
+    import base64
+    assert r.success and m["kind"] == "file" and m["name"] == "report.csv" and m["mime"] == "text/csv"
+    assert base64.b64decode(m["data"]) == b"a,b\n1,2\n" and m["caption"] == "Here you go"
+    await adapter.send_image("sb:conv-1", "https://example.com/cat.png", caption="cat")
+    m = await next_of(ws, "chat.media")
+    assert m["kind"] == "image" and m["url"] == "https://example.com/cat.png"
+    big = tmp_path / "big.bin"; big.write_bytes(b"0" * (5 * 1024 * 1024 + 1))
+    fell_back = []
+
+    async def fake_super(*a, **k):
+        fell_back.append(a); return types.SimpleNamespace(success=False)
+    sys.modules["gateway.platforms.base"].BasePlatformAdapter.send_document = fake_super
+    await adapter.send_document("sb:conv-1", str(big))
+    assert fell_back  # too big: Hermes's own fallback notice

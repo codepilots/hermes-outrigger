@@ -277,6 +277,12 @@ async def _handle(client: Client, m: dict, ws) -> None:
             "ok": ok, "content": m.get("content"),
             "error": m.get("error") if not ok else None,
         })
+    elif t == "chat.commands":
+        if "chat" not in client.capabilities:
+            raise ProtocolError("no_chat_capability", "declare the 'chat' capability in hello")
+        cat = platform.command_catalog()
+        await ws.send_json({"type": "chat.commands", "commands": cat.get("commands", []),
+                            "source": cat.get("source", ""), "hermes_version": cat.get("hermes_version", "")})
     elif t in ("chat.send", "chat.attach", "chat.stop", "chat.action"):
         await _handle_chat(client, t, m, ws)
     elif t == "progress":
