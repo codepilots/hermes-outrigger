@@ -60,12 +60,16 @@ Verified against the local install docs and source on 2026-11-16:
   mid-run load; tool schemas are cache-stable within a session.
 - V6. `register_tool(..., is_async=True, check_fn=...)` exists.
 
-Unverified, to check before coding (see 12):
+Resolved 2026-11-16 from the Hermes source (see 12):
 
-- U1. Whether plugin aiohttp routes get the gateway's bearer-key middleware.
-- U2. Whether a tool handler's kwargs include `session_id` (V2 covers it via
-  middleware if not).
-- U3. Tool execution timeouts and how an interrupted turn cancels a running tool.
+- U1. Plugin routes get NO auth middleware; the plugin checks the bearer key itself.
+- U2. Tool handlers receive `session_id`, `task_id`, `conversation_id` as kwargs
+  (not `turn_id`). No middleware is needed.
+- U3. Tool calls are abandoned after 420 s. Interrupts set a per-thread flag; async
+  handlers are not cancelled and run on a throwaway worker-thread loop, so the
+  handler is sync and blocks on a Future.
+- Design rule: only documented plugin APIs are used; no underscore members, no core
+  internals.
 
 ## 5. Architecture
 
@@ -113,9 +117,13 @@ One real, static tool, so it passes V3 validation:
 }
 ```
 
-`check_fn` hides the tool when no outrigger is attached to any session in this
-profile. Because schemas are cache-stable (V5), the tool may still be visible in
-a session whose client has gone; calls then fail fast with a clear error.
+The tool has no `check_fn` and is offered whenever the `outrigger` toolset is
+enabled. Hermes caches `check_fn` verdicts for about 30 s and fixes a session's
+tools when the session starts, so hiding the tool while no client is attached
+(for example while the browser reconnects after a gateway restart) left sessions
+started in that window without the tool for good (seen live 2026-11-16). With no
+client attached, calls fail fast with `outrigger_no_client`, and the context block
+in 6.2 is absent, so the model has no reason to call it.
 
 Optional second tool `outrigger_tools` returns the current catalog for the session
 (for models that need to re-read schemas after `tools.update`).
@@ -134,7 +142,7 @@ Call these with outrigger_call{client, tool, args}.
 
 Schemas are rendered compactly (name, params, one-line description, policy).
 Full JSON Schemas are validated by the plugin, not shown in full, to keep tokens
-low. Cap: 2,000 characters per turn; beyond that, list names and point at
+low. Cap: 6,000 characters per turn; beyond that, list names and point at
 `outrigger_tools`.
 
 ### 6.3 Dispatch
@@ -148,7 +156,7 @@ fails):
 4. Return the result as the tool result string (JSON), size-capped.
 
 Waiting is async (`is_async=True`) so a slow client does not block the gateway
-loop. Default timeout 60 s; a client tool may declare its own up to 600 s.
+loop. Default timeout 60 s; a client tool may declare its own up to `max_timeout_s` (400 s).
 Timeout returns `{"error": "outrigger_timeout"}` and sends `cancel` to the client.
 
 ## 7. Control protocol (WebSocket, JSON messages)
@@ -163,19 +171,28 @@ Client to server:
 
 | type | fields | meaning |
 |---|---|---|
-| `hello` | `protocol: 1`, `client: {name, version, kind, label}`, `session_id?`, `tools: [ToolDecl]` | register; bind to session if given |
+| `hello` | `protocol: 1\|2`, `capabilities?: ["chat", …]`, `client: {name, version, kind, label, concurrency?}`, `session_id?`, `tools: [ToolDecl]`, `redaction?: {enabled, categories}` | register; bind to session if given. `concurrency` 1..8, default 1. `redaction` says the client replaces personal data with `⟦TYPE_n⟧` placeholders; the context block then tells the model how to use them and the client's `reveal` tool |
 | `bind` | `session_id` | (re)bind to a session, e.g. after the first chat reply returns its id |
 | `tools.update` | `tools: [ToolDecl]` | replace tool list (e.g. tab changed) |
 | `context.update` | `summary: string` | short live context shown in 6.2 (current tab, open file) |
 | `result` | `call_id`, `ok: bool`, `content` (string or JSON), `error?` | answer a call |
-| `progress` | `call_id`, `message` | optional, surfaced as tool progress |
+| `chat.send` | `chat_id`, `text`, `client_msg_id?` | protocol 2, `chat` capability: a message (or slash command) to the Outrigger platform; see docs/platform.md |
+| `chat.attach` | `chat_id` | route a chat to this client and deliver its outbox (after a reconnect; `home` is the platform's shared home chat) |
+| `chat.stop` | `chat_id` | `/stop` for a chat this client owns |
+| `chat.commands` | | the platform's command catalog (build-time; see docs/platform.md) for autocomplete |
+| `chat.action` | `chat_id`, `kind` (`model`/`choice`/`clarify`/`approval`), `id`, `value` | answer a prompt card (docs/platform.md) |
+| `progress` | `call_id`, `message` | optional; sent to the session's viewers as event `plugin.outrigger.progress` via `ctx.emit_to_session`, and the last one is included in a timeout error |
 | `pong` | | keepalive reply |
 
 Server to client:
 
 | type | fields | meaning |
 |---|---|---|
-| `welcome` | `client_id`, `session_id?`, `limits` | accepted |
+| `welcome` | `client_id`, `session_id?`, `limits`, `platform?` | accepted; `platform: {name, available}` when the client declared `chat` |
+| `chat.accepted` / `chat.message` / `chat.edit` / `chat.typing` | `chat_id`, … | Outrigger platform frames (docs/platform.md) |
+| `chat.commands` | `commands: [{name, args_hint, aliases, description}]`, `hermes_version` | reply to `chat.commands` |
+| `chat.media` | `chat_id`, `message_id`, `kind` (`image`/`file`), `url` or `name`+`mime`+`data` (base64), `caption` | images and files Hermes sends, for clients with the `media` capability |
+| `chat.model_picker` / `chat.choice` / `chat.clarify` / `chat.approval` | `chat_id`, `id`, … | prompt cards for clients with the matching capability; answered with `chat.action`, acknowledged by `chat.action_result` |
 | `call` | `call_id`, `tool`, `args`, `deadline_ms`, `turn_id` | run a tool |
 | `cancel` | `call_id`, `reason` | turn interrupted or timed out |
 | `ping` | | keepalive (every 20 s; drop after 2 misses) |
@@ -211,8 +228,17 @@ human. The plugin does not trust the client's claim; it is information only.
 - Binding sources, v1: the client passes `session_id` it is using in its own
   chat requests (`X-Hermes-Session-Id`), or rebinds after reading the id from the
   `X-Hermes-Session-Id` response header.
-- Session id changes on compression: the plugin keeps a binding keyed by the
-  conversation id (`conversation_id` from V2 kwargs) as well as session id.
+- Compression: the default (`compression.in_place: true`) keeps the session id,
+  so nothing changes. With rotating compression the client follows the
+  conversation two ways: a tool call whose `conversation_id` names a bound
+  session adds the new session id to the client, and `pre_llm_call` on a session
+  whose `parent_session_id` is bound (and which is not on its first turn) does
+  the same, so the context block survives rotation before any call is made.
+- Subagents: a delegated child carries its parent's `conversation_id`. The
+  plugin records child session ids from the `subagent_start` hook (cleared on
+  `subagent_stop`); those sessions see no clients, get
+  `outrigger_subagent_denied`, and never move a binding. `allow_subagents: true`
+  lets them call, still without rebinding.
 - v2 idea, not in scope: "presence" binding, where a client attaches to the
   user's profile and any session may call it after explicit user opt-in.
 
@@ -222,8 +248,12 @@ human. The plugin does not trust the client's claim; it is information only.
   removed from context on the next turn.
 - Reconnect: a client resending `hello` with the same `client.name` and session
   replaces the old connection.
-- Turn interrupted: in-flight calls get `cancel` (mechanism depends on U3; at
-  minimum on the next `on_session_end`).
+- Turn interrupted: `on_session_end` with `interrupted: true` (it fires at the
+  end of every turn) resolves the session's in-flight calls with
+  `outrigger_cancelled` and sends `cancel` to the client.
+- Plugin unload: in-flight calls fail with `outrigger_shutdown`; sockets close.
+- Keepalive: no inbound message for 50 s (two missed pings) drops the client.
+  `hello` must arrive within 10 s.
 - Gateway restart: all clients drop; clients reconnect with backoff (1 s to 30 s).
 
 ## 10. Security model
@@ -237,10 +267,13 @@ Threats, in order of weight:
    tool description; per-turn call cap (default 20 per client).
 2. Wrong client gets a call. Mitigation: strict session binding; no
    cross-session or cross-profile routing; client ids are random per connection.
-3. Key exposure. v1 reuses API_SERVER_KEY, which the client already stores for
-   chat. Passing it in the WS subprotocol header can end up in logs; the plugin
-   must not log handshake headers. v2: per-client tokens minted by
-   `hermes outrigger pair` with a scope of `outrigger` only.
+3. Key exposure. The owner's clients use API_SERVER_KEY, which they already store
+   for chat. Passing it in the WS subprotocol header can end up in logs; the
+   plugin never logs handshake headers. Other clients and people use per-client
+   tokens from `hermes outrigger pair` (done, see platform.md P4). A token only
+   opens the outrigger WebSocket, is limited to its own platform chats, carries
+   its own user id into Hermes's allowlist and slash gating, and can be revoked
+   without a restart.
 4. Gateway exposure. The gateway may listen beyond loopback (LAN, VPN, reverse
    proxy). The outrigger route inherits that exposure;
    settings flag `allow_remote: false` by default rejects non-loopback peers.
@@ -248,7 +281,9 @@ Threats, in order of weight:
    control characters, wrap as JSON string data.
 
 The plugin keeps an audit log under its plugin state dir: timestamp, session,
-client, tool, args hash, policy, outcome, duration. Not the args themselves
+client, tool, args hash, policy, outcome (including `rejected:<code>` for calls
+refused before reaching a client), duration. It lives at
+`$HERMES_HOME/plugin-data/outrigger/audit.jsonl`. Not the args themselves
 (they may contain page data) unless `audit_args: true`.
 
 ## 11. Configuration (`plugins.entries.<id>.settings`)
@@ -258,37 +293,45 @@ client, tool, args hash, policy, outcome, duration. Not the args themselves
 | `enabled_routes` | bool | true | mount /v1/outrigger/* |
 | `allow_remote` | bool | false | accept non-loopback clients |
 | `default_timeout_s` | int | 60 | per call |
-| `max_timeout_s` | int | 600 | cap on client-declared timeout |
+| `max_timeout_s` | int | 400 | cap on client-declared timeout (Hermes abandons tool calls at 420 s) |
 | `max_result_chars` | int | 20000 | per result |
 | `max_calls_per_turn` | int | 20 | per client |
-| `context_max_chars` | int | 2000 | 6.2 cap |
+| `context_max_chars` | int | 6000 | 6.2 cap (fits the sidebar's 20 tools, one-clause descriptions, and the redaction note) |
 | `audit_args` | bool | false | log argument bodies |
+| `allow_subagents` | bool | false | let delegated subagents call clients |
+| `auth_token` | str | "" | bearer token; falls back to `API_SERVER_KEY` env. With neither, only loopback peers may attach |
 
 Manifest v2: `manifest_version: 2`, `license: MIT`, `provides_tools:
-[outrigger_call, outrigger_tools]`, `provides_hooks: [pre_llm_call, on_session_end]`,
-`provides_middleware: [tool_execution]` only if U2 requires it.
+[outrigger_call, outrigger_tools]`, `provides_hooks: [pre_llm_call, on_session_end, subagent_start, subagent_stop]`,
+no middleware.
 
 ## 12. Open questions
 
-1. U1: do plugin routes inherit api_server auth? If not, the plugin checks the
-   key itself (constant-time compare against the configured key).
-2. U2: session id in handler kwargs, or capture via middleware?
-3. U3: tool timeout ceiling in core, and interrupt propagation to async handlers.
-4. Concurrency: the model can issue parallel tool calls. Does the client run them
-   in parallel? Proposal: client declares `concurrency: 1` by default; the plugin
-   queues per client.
-5. Desktop/TUI: should the Desktop app show "outrigger attached" in the session
+1. U1-U3: resolved from source and docs (see 4) and confirmed live on v0.23.1:
+   the route mounts at gateway start (not on hot reload) and needs its own auth;
+   handler `session_id` matches the client's binding; `subagent_start`'s
+   `child_session_id` matches the subagent's tool-call `session_id`. Plugin
+   toolsets are opt-in: `hermes tools enable --platform api_server outrigger`.
+   Not yet checked live: `is_first_turn: false` on a rotated compression session
+   (only relevant with `compression.in_place: false`).
+2. (resolved) Concurrency: the client declares `concurrency` in `hello`
+   (default 1); the plugin queues per client and queue time counts against the
+   call's timeout.
+3. Desktop/TUI: should the Desktop app show "outrigger attached" in the session
    header? Possible via `emit_to_session`; out of scope for v1.
-6. Name: resolved, "outrigger" (plugin id `outrigger`). Avoids Atlas Omnia
+4. Name: resolved, "outrigger" (plugin id `outrigger`). Avoids Atlas Omnia
    "Sidecar", and "tether" / "hermes-remote-hands" already in the catalog.
-7. Should `outrigger_call` be hidden from subagents (delegate_task) by default?
-   Proposal: yes; a child should not drive the user's browser unattended.
+5. (resolved) Subagents are denied by default; see 8.
 
 ## 13. Milestones
 
-- M0: verify U1 to U3 with a throwaway plugin (spike).
+- M0: verify U1 to U3 on a live gateway. Done 2026-11-16.
 - M1: plugin with WS, hello/call/result, one client, `auto` only; test client in
-  Python.
+  Python. Done.
 - M2: Hermes Sidebar integration: get_page, run_js with confirm UI.
-- M3: multi-client, tools.update, context.update, audit log.
-- M4: per-client pairing tokens; second client (see scenarios).
+- M3: multi-client, tools.update, context.update, audit log. Done.
+- M4: per-client pairing tokens. Done 2026-11-17 (platform P4).
+- M5: Outrigger platform: clients become a Hermes messaging platform (slash
+  commands, `/model` picker, approvals, clarify) over the same WebSocket. See
+  docs/platform.md. P1-P4 done 2026-11-17 (chat and slash commands, prompt cards,
+  autocomplete/media, per-client tokens with Hermes's slash gating).
