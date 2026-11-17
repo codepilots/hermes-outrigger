@@ -3,7 +3,17 @@ from __future__ import annotations
 
 DEFAULTS = {
     "enabled_routes": True,
-    "allow_remote": False,
+    # Remote access (docs/remote-access.md). A request is "local" only if it comes from
+    # loopback AND carries no reverse-proxy headers: a tunnel (cloudflared) also connects
+    # from 127.0.0.1, so its requests count as remote.
+    "allow_remote": False,  # accept remote clients at all (paired tokens)
+    "owner_key_remote": False,  # also accept the API key from remote clients (prefer admin tokens)
+    # Toolsets for paired non-admin users' chats (Hermes's toolsets_for_source); the owner
+    # and admin tokens keep the platform default. "no_mcp" keeps MCP servers out.
+    "user_toolsets": ["web", "outrigger", "no_mcp"],
+    "max_clients_per_token": 4,
+    "user_messages_per_min": 20,  # chat messages and // commands per paired non-admin user
+    "max_chat_chars": 100_000,
     "auth_token": "",
     "default_timeout_s": 60,
     "max_timeout_s": 400,  # Hermes abandons tool calls at 420s

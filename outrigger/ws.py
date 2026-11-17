@@ -47,6 +47,28 @@ def _is_loopback(request: web.Request) -> bool:
         return False
 
 
+# A reverse proxy or tunnel (cloudflared, nginx, Caddy…) on this machine connects from
+# loopback; these headers say the request really came from elsewhere.
+PROXY_HEADERS = ("CF-Connecting-IP", "CF-Ray", "CF-Visitor", "True-Client-IP", "X-Forwarded-For",
+                 "X-Forwarded-Host", "X-Forwarded-Proto", "X-Real-IP", "Forwarded", "Via")
+
+
+def _is_local(request: web.Request) -> bool:
+    """A client on this machine: loopback and not relayed by a proxy."""
+    return _is_loopback(request) and not any(h in request.headers for h in PROXY_HEADERS)
+
+
+def _peer(request: web.Request) -> str:
+    """For logs only (never for decisions): the client address a proxy reports, else the socket's."""
+    for h in ("CF-Connecting-IP", "True-Client-IP", "X-Real-IP"):
+        if request.headers.get(h):
+            return one_line(request.headers[h], 64)
+    xff = request.headers.get("X-Forwarded-For", "")
+    if xff:
+        return one_line(xff.split(",")[0], 64)
+    return str(request.remote or "?")
+
+
 OWNER = {"kind": "owner"}
 
 
@@ -54,13 +76,16 @@ def authenticate(request: web.Request) -> tuple[web.Response | None, dict | None
     """(refusal, principal). The principal is the owner (API key or, with no key set,
     loopback) or a paired client token's user. Never logs headers or keys."""
     presented = _presented_key(request)
-    loopback = _is_loopback(request)
+    local = _is_local(request)
     rec = tokens.verify(presented) if presented.startswith("otr_") else None
     if rec is not None:
-        if not loopback and not settings.get("allow_remote"):
-            log.warning("outrigger: refused non-loopback peer %s (allow_remote is off)", request.remote)
+        if not local and not settings.get("allow_remote"):
+            log.warning("outrigger: refused remote client %s (allow_remote is off)", _peer(request))
             return web.json_response({"error": "forbidden"}, status=403), None
         return None, {"kind": "token", **rec}
+    if presented.startswith("otr_"):
+        log.warning("outrigger: bad or revoked token from %s", _peer(request))
+        return web.json_response({"error": "unauthorized"}, status=401), None
     refusal = authorize(request)
     return refusal, (None if refusal is not None else OWNER)
 
@@ -68,20 +93,48 @@ def authenticate(request: web.Request) -> tuple[web.Response | None, dict | None
 def authorize(request: web.Request) -> web.Response | None:
     """None if allowed as the owner. Never logs headers or the key."""
     key = _expected_key()
-    loopback = _is_loopback(request)
+    local = _is_local(request)
     if not key:
-        # No credential configured: only a local process may attach.
-        if not loopback:
-            log.warning("outrigger: refused non-loopback peer %s (no key configured)", request.remote)
+        # No credential configured: only a process on this machine (not via a proxy) may attach.
+        if not local:
+            log.warning("outrigger: refused remote client %s (no key configured)", _peer(request))
             return web.json_response({"error": "forbidden"}, status=403)
         return None
-    if not loopback and not settings.get("allow_remote"):
-        log.warning("outrigger: refused non-loopback peer %s (allow_remote is off)", request.remote)
+    if not local and not (settings.get("allow_remote") and settings.get("owner_key_remote")):
+        # The API key unlocks the whole gateway; by default it never works from outside.
+        log.warning("outrigger: refused the API key from remote client %s (owner_key_remote is off; use a paired token)",
+                    _peer(request))
         return web.json_response({"error": "forbidden"}, status=403)
     if not hmac.compare_digest(_presented_key(request).encode(), key.encode()):
-        log.warning("outrigger: bad or missing key from %s", request.remote)
+        log.warning("outrigger: bad or missing key from %s", _peer(request))
         return web.json_response({"error": "unauthorized"}, status=401)
     return None
+
+
+def _limited(client: Client) -> bool:
+    """A paired non-admin user (rate-limited, narrower toolsets)."""
+    p = client.principal
+    return p.get("kind") == "token" and not p.get("admin")
+
+
+_RATE: dict[str, list[float]] = {}
+
+
+def _rate_check(client: Client) -> None:
+    """Per-user limit on messages that start Hermes turns (chat and // commands)."""
+    if not _limited(client):
+        return
+    per_min = int(settings.get("user_messages_per_min") or 0)
+    if per_min <= 0:
+        return
+    now = time.monotonic()
+    key = client.principal.get("user_id", "")
+    recent = [t for t in _RATE.get(key, []) if now - t < 60]
+    if len(recent) >= per_min:
+        _RATE[key] = recent
+        raise ProtocolError("rate_limited", f"at most {per_min} messages a minute; try again shortly")
+    recent.append(now)
+    _RATE[key] = recent
 
 
 def _limits() -> dict:
@@ -150,8 +203,10 @@ async def ws_handler(request: web.Request) -> web.StreamResponse:
         except RuntimeError as e:
             await _err(ws, "too_many_clients", str(e), close=True)
             return ws
-        log.info("outrigger: client %s (%s) attached, session %s, %d tool(s)",
-                 client.id, client.name, client.session_id, len(client.tools))
+        log.info("outrigger: client %s (%s, %s) attached from %s, session %s, %d tool(s)",
+                 client.id, client.name,
+                 "owner" if principal.get("kind") == "owner" else f"token {principal.get('id')}",
+                 _peer(request), client.session_id, len(client.tools))
         await ws.send_json(_welcome(client, client.session_id))
 
         async for raw in ws:
@@ -264,8 +319,9 @@ async def _handle_chat(client: Client, t: str, m: dict, ws) -> None:
     text = m.get("text")
     if not isinstance(text, str) or not text.strip():
         raise ProtocolError("bad_chat", "text must be a non-empty string")
-    if len(text) > MAX_MSG:
-        raise ProtocolError("bad_chat", "text too long")
+    if len(text) > int(settings.get("max_chat_chars") or MAX_MSG):
+        raise ProtocolError("bad_chat", f"text too long (max {settings.get('max_chat_chars')} characters)")
+    _rate_check(client)
     mid = m.get("client_msg_id")
     mid = one_line(mid, 64) if isinstance(mid, str) and mid else "oin_" + __import__("secrets").token_hex(6)
     platform.attach(client, local)
@@ -314,6 +370,7 @@ async def _handle_doc(client: Client, t: str, m: dict, ws) -> None:
             if "chat" not in client.capabilities:
                 raise notebook.NotebookError("no_chat", "// commands need the 'chat' capability")
             instruction = str(m.get("instruction") or "")
+            _rate_check(client)
             sel = m.get("selection")
             selection = None
             if isinstance(sel, dict):

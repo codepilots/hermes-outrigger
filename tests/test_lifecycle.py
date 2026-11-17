@@ -49,6 +49,10 @@ async def test_remote_refused_unless_allow_remote(aiohttp_client, monkeypatch):
         await connect(c, key="k3y")
     assert e.value.status == 403
     settings.SETTINGS["allow_remote"] = True
+    with pytest.raises(aiohttp.WSServerHandshakeError) as e:  # the key stays local by default
+        await connect(c, key="k3y")
+    assert e.value.status == 403
+    settings.SETTINGS["owner_key_remote"] = True
     with pytest.raises(aiohttp.WSServerHandshakeError) as e:
         await connect(c, key="wrong")
     assert e.value.status == 401

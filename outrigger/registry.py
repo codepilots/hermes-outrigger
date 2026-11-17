@@ -86,7 +86,17 @@ class Registry:
                 if c.name == client.name and c.session_id == client.session_id and c.principal == client.principal:
                     replaced = c
                     self._drop_locked(c, "outrigger_replaced")
-            if len(self.clients) >= MAX_CLIENTS:
+            # Paired tokens can't crowd out the owner: each token has its own cap, all
+            # tokens together share MAX_CLIENTS, and the owner has MAX_CLIENTS of their own.
+            from . import settings
+            p = client.principal
+            if p.get("kind") == "token":
+                mine = sum(1 for c in self.clients.values() if c.principal.get("id") == p.get("id"))
+                if mine >= int(settings.get("max_clients_per_token") or 4):
+                    raise RuntimeError("too many connections for this token")
+                if sum(1 for c in self.clients.values() if c.principal.get("kind") == "token") >= MAX_CLIENTS:
+                    raise RuntimeError("too many outrigger clients")
+            elif sum(1 for c in self.clients.values() if c.principal.get("kind") != "token") >= MAX_CLIENTS:
                 raise RuntimeError("too many outrigger clients")
             self.clients[client.id] = client
             return replaced

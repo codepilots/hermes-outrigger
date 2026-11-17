@@ -33,7 +33,10 @@ upgrading Hermes, run `python tools/gen_command_catalog.py`.
 `hermes outrigger tokens`, `hermes outrigger revoke <id>`. A token client chats
 only through the Outrigger platform, as its own user. Non-admin users can run the
 slash commands in the `user_allowed_commands` setting, plus `/help` and `/whoami`.
-For a gateway on another machine, also set `allow_remote: true`.
+For a gateway on another machine, or to reach it through a tunnel such as Cloudflare, see
+docs/remote-access.md: expose only `/v1/outrigger/ws`, set `allow_remote: true`, and use paired
+tokens remotely (the API key works only on the Hermes machine unless `owner_key_remote` is on).
+Paired non-admin users get a narrow toolset (`user_toolsets`), connection and message limits.
 
 **Notebook mode** (off until configured): set `notebook_roots` in the plugin
 settings, e.g. `plugins.entries.outrigger.settings.notebook_roots: {notes:

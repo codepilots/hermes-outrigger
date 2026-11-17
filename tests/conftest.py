@@ -19,6 +19,8 @@ def clean(monkeypatch, tmp_path):
     REGISTRY.close_all()
     REGISTRY.turns.clear()
     REGISTRY.call_counts.clear()
+    from outrigger import ws as _ws
+    _ws._RATE.clear()
     REGISTRY.subagents.clear()
     REGISTRY.intent.clear()
     REGISTRY.actions.clear()

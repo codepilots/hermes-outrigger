@@ -107,6 +107,19 @@ def access_extra() -> dict:
             "user_allowed_commands": [str(c) for c in settings.get("user_allowed_commands")]}
 
 
+def toolsets_for_user(user_id: str) -> list[str] | None:
+    from . import tokens
+    if user_id == str(settings.get("platform_owner_id") or "owner"):
+        return None
+    _, admins = tokens.active_users()
+    if user_id in admins:
+        return None
+    ts = settings.get("user_toolsets")
+    ts = [str(t) for t in ts] if isinstance(ts, list) else ["web", "outrigger", "no_mcp"]
+    # Hermes treats an empty override as "none given" (the full default), so say "nothing".
+    return ts or ["no_mcp"]
+
+
 def attach(client: Client, local: str) -> str:
     """Route a chat to this client (latest wins, e.g. after a reconnect)."""
     key = chat_key(client, local)
@@ -336,6 +349,12 @@ def _make_adapter_class():
             client = client_for_chat(chat_id)
             return {"name": f"{client.label or client.name}" if client else chat_id,
                     "type": "dm", "chat_id": chat_id}
+
+        def toolsets_for_source(self, source):
+            """Hermes's per-source toolset override (BasePlatformAdapter, public): paired
+            non-admin users get settings.user_toolsets instead of the platform default
+            (which includes terminal and file tools). None keeps the default."""
+            return toolsets_for_user(str(getattr(source, "user_id", "") or ""))
 
         def sync_access(self) -> None:
             """Update this platform's live config extra (the gateway reads the same object)."""

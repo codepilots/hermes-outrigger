@@ -69,6 +69,9 @@ def mint(user_id: str, *, user_name: str = "", label: str = "", admin: bool = Fa
     """Create a token; returns (token_id, token). The token is not stored and can't be shown again."""
     if not USER_RE.match(user_id or ""):
         raise ValueError("user id: 1-64 of A-Z a-z 0-9 _ . @ -")
+    from . import settings
+    if user_id == str(settings.get("platform_owner_id") or "owner"):
+        raise ValueError(f"{user_id!r} is the owner's id (platform_owner_id); pick another, or use --admin")
     with _lock:
         data = _load()
         tid = secrets.token_hex(4)
