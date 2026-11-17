@@ -277,19 +277,21 @@ async def _handle_doc(client: Client, t: str, m: dict, ws) -> None:
     """Notebook mode (docs/notebook.md): notes on the Hermes host, `//` commands."""
     if "notebook" not in client.capabilities:
         raise ProtocolError("no_notebook_capability", "declare the 'notebook' capability in hello")
-    if client.principal.get("kind") != "owner":
-        raise ProtocolError("not_allowed", "notebook mode is for the owner")
     if not notebook.enabled():
         raise ProtocolError("notebook_off", "no notebook_roots configured in the outrigger plugin settings")
+    allowed = notebook.allowed_roots(client)
+    if not allowed:
+        raise ProtocolError("not_allowed", "no notebook roots for this user (notebook_roots_for)")
     doc_id = m.get("doc_id")
     try:
         if t == "doc.list":
-            await ws.send_json({"type": "doc.list", "roots": sorted(notebook.roots()),
-                                "notes": notebook.listing(m.get("root"), str(m.get("query") or ""), m.get("limit") or 50)})
+            await ws.send_json({"type": "doc.list", "roots": sorted(allowed),
+                                "notes": notebook.listing(m.get("root"), str(m.get("query") or ""), m.get("limit") or 50, allowed)})
         elif t == "doc.open":
-            doc = notebook.open_doc(str(m.get("root") or ""), str(m.get("path") or ""), client)
+            doc = notebook.open_doc(str(m.get("root") or ""), str(m.get("path") or ""), client, allowed)
             notebook.ensure_watcher()
             await ws.send_json(notebook.content_frame(doc))
+            notebook.broadcast(doc, notebook.presence_frame(doc))
         elif t == "doc.close":
             notebook.close_doc(str(doc_id), client)
         elif t == "doc.update":
@@ -300,7 +302,7 @@ async def _handle_doc(client: Client, t: str, m: dict, ws) -> None:
             version = notebook.update(doc, str(m.get("base_version")), text)
             await ws.send_json({"type": "doc.saved", "doc_id": doc.doc_id, "version": version})
             notebook.broadcast(doc, {"type": "doc.changed", "doc_id": doc.doc_id, "text": doc.text,
-                                     "version": version, "by": "other-client"}, exclude=client)
+                                     "version": version, "by": "other-client", "who": notebook.who(client)}, exclude=client)
         elif t == "doc.undo":
             doc = notebook.get(str(doc_id), client)
             notebook.undo(doc, str(m.get("snapshot") or ""))
@@ -325,7 +327,7 @@ async def _handle_doc(client: Client, t: str, m: dict, ws) -> None:
             key = platform.chat_key(client, local)
             lock["chat_key"] = key
             notebook.NOTE_CHATS[key] = doc.doc_id
-            notebook.broadcast(doc, {"type": "doc.lock", "doc_id": doc.doc_id, "locked": True, "by": "hermes",
+            notebook.broadcast(doc, {"type": "doc.lock", "doc_id": doc.doc_id, "locked": True, "by": "hermes", "who": lock["who"],
                                      "instruction": lock["instruction"], "snapshot": lock["snapshot"],
                                      "chat_id": local})
             notebook.broadcast(doc, notebook.content_frame(doc, by="command"))

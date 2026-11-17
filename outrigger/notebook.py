@@ -53,6 +53,29 @@ def roots() -> dict[str, Path]:
     return out
 
 
+def allowed_roots(client) -> set[str]:
+    """Roots this client's user may use: the owner gets all; a paired token's user gets the
+    roots listed for them in notebook_roots_for ({"ann": ["shared"]}, or "*" for all)."""
+    available = set(roots())
+    p = getattr(client, "principal", {"kind": "owner"})
+    if p.get("kind") == "owner":
+        return available
+    grants = (settings.get("notebook_roots_for") or {}).get(p.get("user_id"), [])
+    if grants == "*" or (isinstance(grants, list) and "*" in grants):
+        return available
+    return available & {str(g) for g in grants} if isinstance(grants, list) else set()
+
+
+def who(client) -> dict:
+    """How a client shows up to others on a note: its user and which app it is."""
+    from .platform import user_of
+    if not hasattr(client, "principal"):
+        return {"client_id": "", "user": "", "name": "", "label": ""}
+    user_id, user_name = user_of(client)
+    return {"client_id": client.id, "user": user_id, "name": user_name or user_id,
+            "label": client.label or client.name}
+
+
 def enabled() -> bool:
     return bool(roots())
 
@@ -75,11 +98,11 @@ def resolve(root: str, rel: str) -> Path:
     return full
 
 
-def listing(root: str | None = None, query: str = "", limit: int = 50) -> list[dict]:
+def listing(root: str | None = None, query: str = "", limit: int = 50, allowed: set | None = None) -> list[dict]:
     q = (query or "").lower().strip()
     found = []
     for name, base in roots().items():
-        if root and name != root:
+        if (root and name != root) or (allowed is not None and name not in allowed):
             continue
         for dirpath, dirnames, filenames in os.walk(base):
             dirnames[:] = [d for d in dirnames if not d.startswith(".")]
@@ -145,7 +168,9 @@ def _write(doc: Doc, text: str) -> None:
     doc.text, doc.version, doc.stat = text, version_of(text), _stat(doc.full)
 
 
-def open_doc(root: str, rel: str, client) -> Doc:
+def open_doc(root: str, rel: str, client, allowed: set | None = None) -> Doc:
+    if allowed is not None and root not in allowed:
+        raise NotebookError("no_root", f"unknown notebook root {root!r}")
     full = resolve(root, rel)
     if not full.is_file():
         raise NotebookError("not_found", f"no note {rel}")
@@ -164,11 +189,19 @@ def open_doc(root: str, rel: str, client) -> Doc:
 
 def close_doc(doc_id: str, client) -> None:
     doc = DOCS.get(doc_id)
-    if doc is None:
+    if doc is None or client not in doc.clients:
         return
     doc.clients.discard(client)
     if not doc.clients and not doc.lock:
         DOCS.pop(doc_id, None)
+    else:
+        broadcast(doc, presence_frame(doc))
+
+
+def presence_frame(doc: Doc) -> dict:
+    """Who has this note open (N4)."""
+    return {"type": "doc.presence", "doc_id": doc.doc_id,
+            "viewers": [who(c) for c in sorted(doc.clients, key=lambda c: c.connected_at) if not c.closed]}
 
 
 def drop_client(client) -> None:
@@ -256,7 +289,7 @@ def content_frame(doc: Doc, by: str = "open") -> dict:
 def _lock_info(doc: Doc) -> dict | None:
     if not doc.lock:
         return None
-    return {k: doc.lock.get(k) for k in ("instruction", "snapshot", "started")}
+    return {k: doc.lock.get(k) for k in ("instruction", "snapshot", "started", "who")}
 
 
 def broadcast(doc: Doc, msg: dict, *, exclude=None) -> None:
@@ -316,7 +349,7 @@ def start_command(doc: Doc, client, base_version: str, line: int | None, instruc
         sid = snapshot(doc)
         if line is not None:
             _write(doc, _strip_command_line(doc.text, line, instruction))
-        doc.lock = {"by": "hermes", "instruction": instruction[:300], "snapshot": sid, "line": line,
+        doc.lock = {"by": "hermes", "who": who(client), "instruction": instruction[:300], "snapshot": sid, "line": line,
                     "selection": selection, "started": int(time.time()), "client": client,
                     "session_id": None, "chat_key": None}
     return doc.lock

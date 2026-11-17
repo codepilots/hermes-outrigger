@@ -1,7 +1,7 @@
 # Notebook mode: edit a note on the Hermes host, with `//` commands
 
-Date: 2026-11-17. Status: **N1-N3 implemented** (2026-11-17,
-`outrigger/notebook.py`, sidebar `notebook.js` and `notebook.html`); N4 proposed. Builds on the Outrigger platform
+Date: 2026-11-17. Status: **N1-N4 implemented** (2026-11-17,
+`outrigger/notebook.py`, sidebar `notebook.js` and `notebook.html`). Builds on the Outrigger platform
 (docs/platform.md) and the browser sidebar.
 
 Decided (2026-11-17):
@@ -221,6 +221,27 @@ editor is locked), but the composer can still send ordinary chat or `/stop`.
 - **Live check, 2026-11-17:** selecting one line of a scratch note and asking
   "translate into French": Hermes translated only that line, and the editor
   locked and unlocked with the summary and highlight.
+
+## 8c. As built (N4)
+
+- **Per-user roots.** `notebook_roots_for: {user_id: [root, …] | "*"}`. The
+  owner always gets every root. A paired token user gets only their listed roots,
+  and nothing without an entry. Listing, opening and every `doc.*` call are
+  checked against that set.
+- **Commands from paired users** run as that user on the Outrigger platform (their
+  user id on the MessageEvent). Hermes's slash-command gating applies as in chat.
+  The agent itself has its usual tools, so give paired users roots you are
+  comfortable with Hermes editing on their behalf.
+- **Presence.** `doc.presence {viewers: [{client_id, user, name, label}]}` is
+  broadcast when someone opens or closes a note or disconnects.
+  `doc.changed (by: other-client)` and `doc.lock` carry `who`. The sidebar shows
+  initials badges for the others, "Ann edited", and "Hermes is working on Ann's
+  request: …". Only the requester sees Stop: the plugin accepts `chat.stop` only
+  for a client's own chats.
+- **Live check, 2026-11-17:** two owner connections on a scratch note saw each
+  other in `doc.presence`, the edit arrived with `who`, and presence updated
+  when one left. Paired-user roots and the lock attribution were checked in two
+  extension profiles against the plugin code.
 
 ## 9. Milestones
 

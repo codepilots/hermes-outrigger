@@ -18,6 +18,7 @@ DEFAULTS = {
     "review_deny": "ask",
     # Notebook mode: {"name": "~/path"} roots whose .md notes the owner's clients may open.
     "notebook_roots": {},
+    "notebook_roots_for": {},  # paired users' roots: {"ann": ["shared"]} or {"ann": "*"}; the owner gets all
     "notebook_max_bytes": 2 * 1024 * 1024,
     "notebook_lock_timeout_s": 600,
     "platform": True,  # register the Outrigger messaging platform (needs a gateway restart)

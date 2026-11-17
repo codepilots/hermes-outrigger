@@ -38,7 +38,9 @@ For a gateway on another machine, also set `allow_remote: true`.
 **Notebook mode** (off until configured): set `notebook_roots` in the plugin
 settings, e.g. `plugins.entries.outrigger.settings.notebook_roots: {notes:
 ~/vaults/notes}`. Clients can then open `.md` notes from those folders, edit them
-with autosave, and send `//` lines to Hermes. See docs/notebook.md.
+with autosave, and send `//` lines to Hermes. Paired token users get only the
+roots listed for them in `notebook_roots_for` (e.g. `{ann: [shared]}`), and
+everyone with a note open sees who else is in it. See docs/notebook.md.
 
 `outrigger_call` is offered in every session once the toolset is enabled, so a
 client can attach before or after the conversation starts; with no client

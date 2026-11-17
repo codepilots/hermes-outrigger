@@ -213,3 +213,69 @@ async def test_command_on_a_selection(aiohttp_client, vault, adapter):
     await w.send_json({"type": "doc.command", "doc_id": doc["doc_id"], "base_version": doc["version"],
                        "selection": {"from_line": 2, "to_line": 99}, "instruction": "x"})
     assert (await next_of(w, "doc.error"))["code"] == "bad_selection"
+
+
+# ---------------------------------------------------------------- N4: users and presence
+
+@pytest.fixture
+def two_roots(vault, tmp_path):
+    shared = tmp_path / "shared"; shared.mkdir()
+    (shared / "Plan.md").write_text("# Plan\n")
+    settings.SETTINGS["notebook_roots"] = {"notes": str(vault), "shared": str(shared)}
+    return shared
+
+
+async def test_token_users_get_only_their_roots(aiohttp_client, two_roots):
+    _, tok = tokens.mint("ann", user_name="Ann")
+    c = await start(aiohttp_client)
+    t = await nb_client(c, key=tok, name="ann-sb")
+    await t.send_json({"type": "doc.list"})
+    assert (await next_of(t, "error"))["code"] == "not_allowed"          # no mapping: nothing
+    settings.SETTINGS["notebook_roots_for"] = {"ann": ["shared"]}
+    await t.send_json({"type": "doc.list"})
+    lst = await next_of(t, "doc.list")
+    assert lst["roots"] == ["shared"] and [n["root"] for n in lst["notes"]] == ["shared"]
+    await t.send_json({"type": "doc.open", "root": "notes", "path": "Projects/Garden.md"})
+    assert (await next_of(t, "doc.error"))["code"] == "no_root"          # not hers
+    await t.send_json({"type": "doc.open", "root": "shared", "path": "Plan.md"})
+    assert (await next_of(t, "doc.content"))["text"] == "# Plan\n"
+    settings.SETTINGS["notebook_roots_for"] = {"ann": "*"}
+    await t.send_json({"type": "doc.list"})
+    assert (await next_of(t, "doc.list"))["roots"] == ["notes", "shared"]
+    o = await nb_client(c, name="owner-sb")                             # the owner always gets all
+    await o.send_json({"type": "doc.list"})
+    assert (await next_of(o, "doc.list"))["roots"] == ["notes", "shared"]
+
+
+async def test_presence_and_who(aiohttp_client, two_roots, adapter):
+    await adapter.connect()
+    settings.SETTINGS["notebook_roots_for"] = {"ann": ["shared"]}
+    _, tok = tokens.mint("ann", user_name="Ann")
+    c = await start(aiohttp_client)
+    me = await nb_client(c, name="owner-sb")
+    ann = await nb_client(c, key=tok, name="ann-sb")
+    await me.send_json({"type": "doc.open", "root": "shared", "path": "Plan.md"})
+    doc = await next_of(me, "doc.content")
+    assert [v["user"] for v in (await next_of(me, "doc.presence"))["viewers"]] == ["owner"]
+    await ann.send_json({"type": "doc.open", "root": "shared", "path": "Plan.md"})
+    await next_of(ann, "doc.content")
+    pres = await next_of(me, "doc.presence")
+    assert [(v["user"], v["name"]) for v in pres["viewers"]] == [("owner", "owner"), ("ann", "Ann")]
+    # Ann's edit reaches me with who made it
+    await ann.send_json({"type": "doc.update", "doc_id": doc["doc_id"], "base_version": doc["version"], "text": "# Plan\n\nAnn's idea."})
+    ch = await next_of(me, "doc.changed")
+    assert ch["who"]["user"] == "ann" and ch["text"].endswith("Ann's idea.")
+    # Ann's // command: both see the lock and whose request it is
+    ver = (await next_of(ann, "doc.saved"))["version"]
+    await ann.send_json({"type": "doc.update", "doc_id": doc["doc_id"], "base_version": ver, "text": "# Plan\n\nAnn's idea.\n//expand"})
+    ver = (await next_of(ann, "doc.saved"))["version"]
+    await ann.send_json({"type": "doc.command", "doc_id": doc["doc_id"], "base_version": ver, "line": 4, "instruction": "expand"})
+    lock = await next_of(me, "doc.lock")
+    assert lock["locked"] and lock["who"]["name"] == "Ann"
+    await asyncio.sleep(0.05)
+    assert HANDLED[-1].source["user_id"] == "ann"                     # Hermes runs it as Ann
+    notebook.end_command(notebook.DOCS[doc["doc_id"]])
+    # Ann leaves: presence updates
+    await ann.close(); await asyncio.sleep(0.1)
+    pres = await next_of(me, "doc.presence")
+    assert [v["user"] for v in pres["viewers"]] == ["owner"]

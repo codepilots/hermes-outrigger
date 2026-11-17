@@ -21,6 +21,7 @@ config_schema:
   review: {type: str, default: "smart", description: "smart: an LLM reviews calls that need approval (deny blocks; approve lets the client skip asking). off: no review"}
   review_timeout_s: {type: int, default: 30, description: "Reviewer call timeout"}
   notebook_roots: {type: dict, default: {}, description: "Notebook mode: name -> folder whose .md notes the owner's clients may open and edit, e.g. {notes: ~/vaults/notes}"}
+  notebook_roots_for: {type: dict, default: {}, description: "Roots paired token users may open, by user id, e.g. {ann: [shared]} or {ann: '*'}. The owner always gets every root"}
   notebook_max_bytes: {type: int, default: 2097152, description: "Largest note Notebook mode opens or writes"}
   notebook_lock_timeout_s: {type: int, default: 600, description: "A // command's lock is released after this long"}
   platform: {type: bool, default: true, description: "Register the Outrigger messaging platform: clients' chats go through Hermes's messaging pipeline (slash commands, /model). Gateway restart needed"}
