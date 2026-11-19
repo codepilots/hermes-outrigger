@@ -1,9 +1,13 @@
 """LLM reviewer for client tool calls that need approval (policy != "auto").
 
 Mirrors Hermes's terminal smart approvals: an auxiliary model judges each call
-and answers APPROVE, DENY or ESCALATE. DENY is enforced here (the call never
-reaches the client). APPROVE and ESCALATE travel to the client with the call;
-the client decides whether an APPROVE is enough to run without asking the user.
+and answers APPROVE, DENY or ESCALATE. All three verdicts travel to the client
+with the call as advisory metadata. A DENY is enforced gateway-side (the call
+never reaches the client) only when the operator sets review_deny="block"; with
+the default review_deny="ask" the client must put a DENY to the user as a flagged
+prompt, and decides whether an APPROVE is enough to run without asking the user.
+Arguments too large to review safely force ESCALATE (fail closed), never a silent
+approve on a truncated prefix.
 
 Only documented plugin APIs are used: ctx.llm.complete_structured and
 ctx.register_auxiliary_task (the task inherits Hermes's "approval" model).
@@ -12,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 
 from . import settings
 from .protocol import one_line
@@ -20,6 +25,18 @@ log = logging.getLogger("hermes.plugins.outrigger")
 
 TASK = "outrigger_review"
 VERDICTS = ("approve", "deny", "escalate")
+
+# Dedicated budgets so context padding can never eat the operative arguments.
+# args is serialized separately and spliced in whole; if it does not fit, the
+# call is escalated (fail closed) instead of reviewed on a silently cut prefix.
+ARGS_BUDGET = 8000
+CONTEXT_BUDGET = 4000
+# Defang any tag-like use of the wrapper delimiter inside the data region: rewrite
+# '<untrusted' / '</untrusted' (any case or spacing) to the non-tag token
+# '< untrusted_' so it can never form a second opening/closing wrapper tag, even
+# under whitespace-tolerant reading. json.dumps never emits a raw '<' from
+# non-ASCII, so this covers every literal delimiter that survives serialization.
+_DEFANG = re.compile(r"<\s*/?\s*untrusted", re.IGNORECASE)
 
 _llm = None  # ctx.llm when available
 
@@ -88,23 +105,48 @@ def review(*, tool: str, description: str, args: dict, client_name: str,
     """Return {"verdict", "reason"}. Never raises: failures escalate to the user."""
     if not enabled():
         return {"verdict": "escalate", "reason": ""}
-    payload = {
-        "user_request": (user_request or "")[-3000:],
-        "client": client_name,
-        "client_context": client_context,
-        "earlier_actions_this_turn": recent_actions or [],
-        "tool": tool,
-        "tool_description": description,
-        "args": args,
-    }
+    # Serialize the operative arguments first and give them a dedicated budget.
+    # If they cannot be fully seen, fail closed BEFORE any model verdict exists,
+    # so an 'approve' on a truncated prefix can never win.
+    try:
+        args_json = json.dumps(args, default=str)
+    except Exception as e:
+        log.warning("outrigger: reviewer ESCALATE (fail closed) — arguments could not be "
+                    "serialized for tool %r: %s", tool, e)
+        return {"verdict": "escalate", "reason": "Arguments could not be serialized for review."}
+    if len(args_json) > ARGS_BUDGET:
+        log.warning("outrigger: reviewer ESCALATE (fail closed) — arguments too large to review "
+                    "safely (%d chars > %d budget) for tool %r on client %r; the user will be asked",
+                    len(args_json), ARGS_BUDGET, tool, client_name)
+        return {"verdict": "escalate", "reason": "Arguments too large to review safely; asking the user."}
     instructions = INSTRUCTIONS
     extra = settings.get("review_policy")
     if extra:
         instructions += "\n\nOperator policy (trusted):\n" + str(extra)
     try:
+        context = {
+            "user_request": (user_request or "")[-3000:],
+            "client": client_name,
+            "client_context": client_context,
+            "earlier_actions_this_turn": recent_actions or [],
+            "tool": tool,
+            "tool_description": description,
+        }
+        context_json = json.dumps(context, default=str)
+        context_cut = len(context_json) > CONTEXT_BUDGET
+        if context_cut:
+            log.warning("outrigger: reviewer context truncated (%d chars > %d budget) for tool %r; "
+                        "arguments remain complete", len(context_json), CONTEXT_BUDGET, tool)
+            context_json = context_json[:CONTEXT_BUDGET]
+        # Splice the bounded args in whole after the separately bounded context, so
+        # padding ahead of args can never consume the args budget or cut its tail.
+        body = context_json[:-1] + ', "args": ' + args_json + "}"
+        if context_cut:
+            body += " [context truncated; arguments complete]"
+        body = _DEFANG.sub("< untrusted_", body)
         r = _llm.complete_structured(
             instructions=instructions,
-            input=[{"type": "text", "text": "<untrusted>\n" + json.dumps(payload, default=str)[:12000] + "\n</untrusted>"}],
+            input=[{"type": "text", "text": "<untrusted>\n" + body + "\n</untrusted>"}],
             json_schema=SCHEMA,
             purpose="outrigger.review",
             temperature=0.0,
