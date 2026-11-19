@@ -1,0 +1,9 @@
+# Test + runtime dependencies for the outrigger plugin suite.
+# Runtime dep is declared in outrigger/plugin.yaml (jsonschema>=4,<5); aiohttp
+# is provided by the Hermes gateway. These pins make the suite reproducible
+# from a fresh venv: python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
+pytest>=8,<9
+pytest-asyncio>=0.23,<1
+pytest-aiohttp>=1.0,<2
+aiohttp>=3.9,<4
+jsonschema>=4,<5
