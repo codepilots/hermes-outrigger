@@ -169,3 +169,19 @@ improved deltas.
      audited (closes the audit-trail escape).
   2. `tokens._load`: isinstance(data, dict) guard so non-dict JSON takes the
      documented empty-store path.
+- Commit: `5aa496f`.
+
+### Step 5 — wire enforcement (in progress)
+- Repo files placed: `scripts/audit_anchor_check.py` (adapted: security-module
+  list post-restructure, conditional authz handling, bare-name anchor resolution,
+  shipping-surface overclaim globs — docs/security-review/ EXEMPT as frozen scan
+  evidence), `.github/workflows/docs-audit.yml` (python 3.14 + node 22, anchor
+  gate --strict-overclaim, mermaid-cli render with --no-sandbox puppeteer config),
+  `AGENTS.md` + `CLAUDE.md` (identical substance; doc-gate rule, same-PR doc
+  update rule, refactor-vs-remediate, frozen-evidence rule).
+- Gate proven both ways: PASS on the real tree (110 anchors, 12 pointers, 0
+  overclaims); negative self-test with a broken anchor (auth.py:99999) FAILs as
+  designed — the gate is not a rubber stamp.
+- Inline hub pointers already present in every security module (step 2/3).
+- Remaining: commit, push, PR, both CI checks green, then branch protection
+  requiring "test" + "docs-audit" (main currently unprotected).
