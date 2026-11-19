@@ -9,7 +9,7 @@ import types
 import aiohttp
 import pytest
 
-from outrigger import cli, settings, tokens, ws as wsmod
+from outrigger import auth as authmod, cli, settings, tokens, ws as wsmod
 from outrigger.registry import REGISTRY
 
 from helpers import TOOLS, start
@@ -67,7 +67,7 @@ async def test_token_authenticates_by_header_and_subprotocol(aiohttp_client, mon
 
 async def test_token_remote_needs_allow_remote(aiohttp_client, monkeypatch):
     _, tok = tokens.mint("ann")
-    monkeypatch.setattr(wsmod, "_is_loopback", lambda r: False)
+    monkeypatch.setattr(authmod, "_is_loopback", lambda r: False)
     c = await start(aiohttp_client)
     with pytest.raises(aiohttp.WSServerHandshakeError) as e:
         await c.ws_connect("/v1/outrigger/ws", protocols=("hermes-outrigger.v1", "bearer." + tok))

@@ -1,4 +1,9 @@
-"""Session events to Hermes frontends via the public ctx.emit_to_session."""
+"""Session events to Hermes frontends via the public ctx.emit_to_session.
+
+Trust boundary: gateway -> session viewers (progress notifications). Never raises;
+a failed emit is logged at debug and dropped. Deliberately does NOT: carry tool
+results or note content to the model, or authenticate — it only forwards progress.
+"""
 from __future__ import annotations
 
 import logging

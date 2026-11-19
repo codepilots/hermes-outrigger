@@ -8,7 +8,14 @@ Discord message does. Replies come back through send/edit_message as
 
 Only the public adapter surface is used: gateway.platforms.base, .event,
 gateway.config (public plugin API).
+
+Trust boundary: token user -> Hermes toolsets / slash-command gating. The
+admin-scope mitigation (toolsets_for_user / access_extra, F-10) stays in this
+module because it reads the live chat registry (CHATS) — see the banner below.
+Deliberately does NOT: authenticate the socket (auth.py / ws.py) or sandbox the
+agent turn; it narrows toolsets and access lists, the gateway pipeline enforces.
 """
+# Audit: see AUDIT.md#security-sensitive-units (platform admin-scope authz / inbound)
 from __future__ import annotations
 
 import asyncio
@@ -78,6 +85,10 @@ def _prefix(client: Client) -> str:
 
 
 def chat_key(client: Client, local_id: str) -> str:
+    """Namespaced chat key: home is owner-only (a token client's "home" is
+    prefixed like any other chat, never the shared owner channel); every other
+    chat carries _prefix (token id for paired users) so two users never share
+    or hijack a chat."""
     # The shared home chat (cron results etc.) belongs to the owner.
     if local_id == HOME and client.principal.get("kind") == "owner":
         return HOME
@@ -98,6 +109,11 @@ def user_of(client: Client) -> tuple[str, str | None]:
     return str(settings.get("platform_owner_id") or "owner"), (settings.get("platform_owner_name") or None)
 
 
+# ---------------------------------------------------------------- admin-scope authz (F-10)
+# Kept in platform.py (NOT moved to a separate authz module): toolsets_for_user
+# reads the live chat registry CHATS below, so it is entangled with platform chat
+# state. Moving it would force a platform import back-reference for no cohesion gain.
+
 def access_extra() -> dict:
     """Hermes's own per-platform access lists (gateway allowlist and slash-command gating),
     kept in step with the token store: the owner and admin users get every command; other
@@ -113,6 +129,13 @@ def access_extra() -> dict:
 
 
 def toolsets_for_user(user_id: str) -> list[str] | None:
+    """Actor: gateway pipeline (user_id only — never the token; F-10 API gap).
+    Control: owner -> None (full); a live non-admin connection of the user
+    narrows their chats to user_toolsets even if another token is admin (fail
+    closed for mixed connections); CHATS scan raced (RuntimeError) -> WARNING +
+    restricted; no live connection -> the token store's per-user admin flag
+    (residual: cron/outbox turns). Sink: Hermes toolset override — None keeps
+    the platform default (terminal/file tools); restricted keeps them out."""
     from . import tokens
     if user_id == str(settings.get("platform_owner_id") or "owner"):
         return None
@@ -152,6 +175,9 @@ def attach(client: Client, local: str) -> str:
 
 
 def owns(client: Client, local: str) -> bool:
+    """Chat-ownership predicate for chat.action / chat.stop: the client must be
+    the one currently serving this namespaced chat (latest attach wins). False
+    -> not_your_chat refusal in ws (cross-chat access denied)."""
     return CHATS.get(chat_key(client, local)) is client
 
 
@@ -392,6 +418,14 @@ def _make_adapter_class():
 
         # ---- inbound (from the websocket route)
         async def receive(self, client: Client, local: str, text: str, message_id: str) -> None:
+            """Actor: authenticated client chat.send / // command (via inbound).
+            Control: sync_access() FIRST (pairing/revocation live without a
+            restart), then attach + build_source with the principal's user_id.
+            Sink: a MessageEvent into Hermes's own pipeline (authorization and
+            slash gating apply). Residual (F-10): the first-ever doc.command on a
+            fresh chat syncs the admin list before attach, so allow_admin_from
+            can include the user for that one message; the gateway identifies
+            callers by user_id, not token."""
             self.sync_access()  # pairing/revoking takes effect without a restart
             key = attach(client, local)
             user_id, user_name = user_of(client)

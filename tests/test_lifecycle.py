@@ -7,7 +7,7 @@ import pytest
 from aiohttp import WSMsgType
 
 import outrigger
-from outrigger import context, dispatch, events, protocol, registry, settings, ws as wsmod
+from outrigger import auth as authmod, context, dispatch, events, protocol, registry, settings, ws as wsmod
 from outrigger.registry import REGISTRY
 
 from helpers import TOOLS, call, connect, serve_one, start
@@ -34,7 +34,7 @@ async def test_no_key_allows_loopback(aiohttp_client):
 
 async def test_no_key_refuses_remote_even_with_allow_remote(aiohttp_client, monkeypatch):
     settings.SETTINGS["allow_remote"] = True
-    monkeypatch.setattr(wsmod, "_is_loopback", lambda request: False)
+    monkeypatch.setattr(authmod, "_is_loopback", lambda request: False)
     c = await start(aiohttp_client)
     with pytest.raises(aiohttp.WSServerHandshakeError) as e:
         await connect(c)
@@ -43,7 +43,7 @@ async def test_no_key_refuses_remote_even_with_allow_remote(aiohttp_client, monk
 
 async def test_remote_refused_unless_allow_remote(aiohttp_client, monkeypatch):
     monkeypatch.setenv("API_SERVER_KEY", "k3y")
-    monkeypatch.setattr(wsmod, "_is_loopback", lambda request: False)
+    monkeypatch.setattr(authmod, "_is_loopback", lambda request: False)
     c = await start(aiohttp_client)
     with pytest.raises(aiohttp.WSServerHandshakeError) as e:
         await connect(c, key="k3y")

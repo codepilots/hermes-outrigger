@@ -1,0 +1,42 @@
+# docs-audit gate — outrigger (adapted from refactor-for-human-audit template).
+# Required status check on main: documentation freshness is a merge gate, not prose.
+name: docs-audit
+on:
+  pull_request:
+    paths:
+      - "outrigger/**"
+      - "tests/**"
+      - "AUDIT.md"
+      - "README.md"
+      - "docs/**"
+      - "outrigger/plugin.yaml"
+      - "scripts/audit_anchor_check.py"
+      - ".github/workflows/docs-audit.yml"
+  push:
+    branches: [main]
+
+jobs:
+  docs-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      # 1+2. anchor freshness + inline hub pointers (stdlib, repo-owned script).
+      - name: Audit hub freshness gate
+        run: python scripts/audit_anchor_check.py --extract-mermaid .mermaid-tmp --strict-overclaim
+      # 3. every mermaid block must render.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install mermaid-cli
+        run: npm install -g @mermaid-js/mermaid-cli
+      - name: Render mermaid diagrams
+        run: |
+          printf '{"args":["--no-sandbox","--disable-setuid-sandbox"]}' > puppeteer-ci.json
+          shopt -s nullglob
+          for f in .mermaid-tmp/*.mmd; do
+            echo "rendering $f"
+            mmdc -i "$f" -o "${f%.mmd}.svg" -p puppeteer-ci.json --quiet
+          done

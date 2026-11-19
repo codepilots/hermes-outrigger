@@ -3,7 +3,18 @@
 Tool handlers run on a Hermes worker thread, not the gateway event loop, so these
 are plain sync functions that block on a concurrent Future; the websocket side
 resolves it from the gateway loop.
+
+Trust boundary: model -> gateway -> client device -> model. Selects the client
+(subagent gate via registry), validates args, runs the advisory reviewer, relays
+the call, and bounds/sanitizes the untrusted result before the model sees it
+(F-07). Every outcome is audited (audit.record): principal=client.principal
+once a client is picked, None for pre-client rejections. One documented
+exception: an OSError in the capture writer (audit._save_capture) propagates
+and skips that call's audit record — fail loud via the ws handler safety net;
+hardening follow-up logged. Capture images go to audit._save_capture. Deliberately does NOT: execute the tool (the client does),
+or make the reviewer's deny final unless review_deny="block" (default advisory).
 """
+# Audit: see AUDIT.md#security-sensitive-units (dispatch relay / result bounding)
 from __future__ import annotations
 
 import concurrent.futures
@@ -12,6 +23,8 @@ import logging
 import time
 
 from . import audit, platform, reviewer, settings
+# Re-export: tests call dispatch._save_capture; audit.py owns the capture writer.
+from .audit import _save_capture
 from .protocol import sanitize_text, validate_args
 from .registry import REGISTRY, Client, ClientGone
 
@@ -24,7 +37,9 @@ def _err(code: str, message: str = "", **extra) -> str:
 
 def platform_chat_clients(session_id) -> list | None:
     """On an Outrigger-platform turn, the client serving this chat (task-local session
-    identity via the public get_session_env); None on other platforms."""
+    identity via the public get_session_env); None on other platforms. Subagent
+    gate applies here too: marked session + allow_subagents=false (default) -> []
+    (no client). Binds the session so per-turn bookkeeping (cancel, caps) applies."""
     try:
         from gateway.session_context import get_session_env
     except Exception:
@@ -50,6 +65,10 @@ def _clients(session_id, conversation_id):
 
 
 def _pick_client(session_id, conversation_id, wanted: str | None):
+    """Select the client for a call. Subagent gate: a marked session with
+    allow_subagents=false (default) -> outrigger_subagent_denied (the mark IS
+    the deny signal). No client / unknown / ambiguous -> JSON refusal listing
+    attached clients; only clients bound to this session/conversation."""
     clients = _clients(session_id, conversation_id)
     if not clients:
         if REGISTRY.is_subagent(session_id) and not settings.get("allow_subagents"):
@@ -76,6 +95,14 @@ def _pick_client(session_id, conversation_id, wanted: str | None):
 
 def outrigger_call(args: dict, session_id: str | None = None,
                    conversation_id: str | None = None, **_ignored) -> str:
+    """Actor: Hermes model (worker thread). Input: tool + args (+client).
+    Control, in order: shape check, client pick (subagent gate), declared-tool
+    lookup, validate_args BEFORE relay, per-turn cap max_calls_per_turn
+    (default 20), advisory reviewer for policy != auto (review=smart + LLM;
+    deny final only with review_deny="block", opt-in). Sink: relay to the
+    client device via _run; every outcome — including pre-client rejections —
+    audited with client.principal. Refusals are JSON error codes (bad_request/
+    no_client/subagent_denied/unknown_tool/bad_args/call_limit/review_denied)."""
     tool = args.get("tool")
     call_args = args.get("args")
     if call_args is None:
@@ -83,6 +110,9 @@ def outrigger_call(args: dict, session_id: str | None = None,
     sid = session_id or conversation_id or ""
 
     def reject(client_id, policy, text, principal=None):
+        """Audit-and-return a pre-client refusal: every rejection (bad request,
+        no/unknown client, unknown tool, bad args, call limit) is recorded with
+        outcome rejected:<code> before the error JSON goes back to the model."""
         audit.record(session_id=sid, client=client_id, tool=tool, args=call_args,
                      policy=policy, outcome="rejected:" + json.loads(text)["error"],
                      duration_s=0.0, principal=principal)
@@ -142,6 +172,14 @@ def outrigger_call(args: dict, session_id: str | None = None,
 
 def _run(client: Client, sid: str, decl, tool: str, call_args: dict, timeout: float,
          review: dict | None = None):
+    """Relay one call and bound the result. Control: per-client semaphore
+    (concurrency 1..8; queue time counts against the deadline), caller-computed
+    timeout min(decl.timeout_s or default_timeout_s=60, max_timeout_s=400) —
+    timeout sends cancel + logs INFO; ClientGone -> disconnected. Sink:
+    client.send(call) then the pending future. Untrusted result handling (F-07):
+    ok -> _format_ok (untrusted label + cap); error detail coerced/sanitized/
+    capped again here (ingress already bounded it); short gateway codes pass
+    through so the cancelled status survives. Returns (outcome, JSON) for audit."""
     deadline = time.monotonic() + timeout
     # Serialise per client (concurrency 1 by default); queue time counts against the deadline.
     if not client.sem.acquire(timeout=timeout):
@@ -192,51 +230,14 @@ def _run(client: Client, sid: str, decl, tool: str, call_args: dict, timeout: fl
     return "cancelled" if code == "outrigger_cancelled" else "error", _err(code, message)
 
 
-CAPTURE_TYPES = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}
-MAX_CAPTURE_BYTES = 8 * 1024 * 1024
-KEEP_CAPTURES = 20
-
-
-def _save_capture(image) -> dict:
-    """A client tool returned an image ({mime, data: base64}). A plugin tool's result is text
-    to the model, so the image is saved as a file and Hermes is told to open it with its
-    vision_analyze tool (which shows it natively on vision-capable models, else describes it)."""
-    import base64
-    import os
-    import secrets
-    import time
-    from pathlib import Path
-    mime = str(image.get("mime", "")).lower() if isinstance(image, dict) else ""
-    ext = CAPTURE_TYPES.get(mime)
-    if not ext or not isinstance(image.get("data"), str):
-        return {"image_error": "unsupported image (png, jpeg or webp, base64)"}
-    try:
-        raw = base64.b64decode(image["data"], validate=True)
-    except Exception:
-        return {"image_error": "invalid base64"}
-    if len(raw) > MAX_CAPTURE_BYTES:
-        return {"image_error": f"image larger than {MAX_CAPTURE_BYTES // (1024 * 1024)} MB"}
-    # The declared type must match the bytes (they're handed to Hermes's vision tool).
-    magic = {".png": raw[:8] == b"\x89PNG\r\n\x1a\n", ".jpg": raw[:3] == b"\xff\xd8\xff",
-             ".webp": raw[:4] == b"RIFF" and raw[8:12] == b"WEBP"}
-    if not magic.get(ext, False):
-        return {"image_error": f"data is not a {mime} image"}
-    home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
-    folder = home / "plugin-data" / "outrigger" / "captures"
-    folder.mkdir(parents=True, exist_ok=True)
-    path = folder / f"{time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(3)}{ext}"
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "wb") as f:
-        f.write(raw)
-    for old in sorted(folder.iterdir(), key=lambda p: p.stat().st_mtime)[:-KEEP_CAPTURES]:
-        old.unlink(missing_ok=True)
-    return {"image_path": str(path), "bytes": len(raw),
-            "hint": "Open it with vision_analyze (image_url = image_path) to look at it."}
-
-
 def _format_ok(content, decl) -> str:
+    """Bound an ok result before the model: capture images go to
+    audit._save_capture (0600 file + vision hint), content coerced to text,
+    sanitize_text caps at min(decl.max_result_chars, max_result_chars=20000).
+    Invariant: every ok result is labeled untrusted: True and truncated is
+    surfaced — client output is data, never instructions."""
     if isinstance(content, dict) and "image" in content:
-        content = {**{k: v for k, v in content.items() if k != "image"}, **_save_capture(content["image"])}
+        content = {**{k: v for k, v in content.items() if k != "image"}, **audit._save_capture(content["image"])}
     if not isinstance(content, str):
         content = json.dumps(content, default=str)
     limit = min(decl.max_result_chars or settings.get("max_result_chars"),
@@ -264,5 +265,8 @@ def outrigger_tools(args: dict, session_id: str | None = None,
 
 
 def cancel_session(session_id: str) -> None:
+    """Turn interrupted: end_turn resolves leftover futures as outrigger_cancelled
+    and a best-effort cancel frame goes to each client (_try_send swallows
+    ClientGone — the future already carries the outcome)."""
     for client, call_id in REGISTRY.end_turn(session_id, cancel=True):
         _try_send(client, {"type": "cancel", "call_id": call_id, "reason": "turn_interrupted"})

@@ -1,4 +1,10 @@
-"""pre_llm_call context block listing attached clients and their tools."""
+"""pre_llm_call context block listing attached clients and their tools.
+
+Trust boundary: gateway -> model context. Tells the model which client tools run
+on the user's own device and that results are untrusted data. Deliberately does
+NOT: authenticate, validate args, or execute tools — it only describes the
+attached surface (subagents get no clients via the registry gate).
+"""
 from __future__ import annotations
 
 import re
@@ -58,6 +64,9 @@ def _sig(decl) -> str:
 
 
 def build(session_id, conversation_id, max_chars: int) -> str | None:
+    """The attached-clients context block for the model (subagents get no clients
+    via the registry gate). Over context_max_chars -> names-only fallback, still
+    capped. Describes the surface and labels results untrusted; enforces nothing."""
     from .dispatch import platform_chat_clients
     clients = platform_chat_clients(session_id)
     if clients is None:

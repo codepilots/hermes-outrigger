@@ -1,12 +1,24 @@
-"""WebSocket control channel: GET /v1/outrigger/ws."""
+"""WebSocket control channel: GET /v1/outrigger/ws.
+
+Responsibility: connection lifecycle (upgrade, hello/registration, keepalive,
+detach), message routing, per-user rate limiting, chat and notebook doc ops, and
+ingress result/error bounding. Trust boundary: untrusted WS peer -> gateway
+control surface. Admission is decided in auth.py (re-exported here so ws.<name>
+stays resolvable and identical); this module only routes already-authenticated
+peers and never logs keys or credential headers (warning peer addresses are
+proxy-header-derived, bounded via one_line).
+
+Deliberately does NOT: decide admission (auth.py), execute client tools (the
+owner's device does, the plugin relays), or write note files (notebook.py). It
+bounds untrusted result/error fields at ingress (F-07); dispatch sanitizes and
+caps again before the model sees them.
+"""
+# Audit: see AUDIT.md#security-sensitive-units (ws routing / rate limit / ingress)
 from __future__ import annotations
 
 import asyncio
-import hmac
-import ipaddress
 import json
 import logging
-import os
 import time
 
 from aiohttp import WSMsgType, web
@@ -14,6 +26,9 @@ from aiohttp import WSMsgType, web
 from . import events, notebook, platform, settings, tokens
 from .protocol import PROTOCOL_VERSION, SUPPORTED_PROTOCOLS, ProtocolError, int_field, one_line, parse_tools, str_field
 from .registry import REGISTRY, Client
+# Re-export the auth surface so ws.<name> stays resolvable and identical (auth.py owns it).
+from .auth import (_expected_key, _presented_key, _is_loopback, PROXY_HEADERS, _is_local,
+                   _peer, OWNER, authenticate, authorize, _limited)
 
 log = logging.getLogger("hermes.plugins.outrigger")
 
@@ -25,130 +40,17 @@ MAX_MSG = 4 * 1024 * 1024
 MAX_CONCURRENCY = 8
 
 
-def _expected_key(request: web.Request | None = None) -> str:
-    """The credential this route expects: the plugin's auth_token, else the gateway's
-    OWN resolved key (the live api_server adapter reads extra['key'], profile-scoped
-    secrets and env at startup and is exposed as app['api_server_adapter']), else raw
-    env API_SERVER_KEY. Consulting the adapter's resolved key keeps a config-keyed
-    gateway from falling into keyless local-owner trust (F-10). Never logs the key."""
-    token = settings.get("auth_token")
-    if token:
-        return token
-    app = getattr(request, "app", None)
-    get = getattr(app, "get", None)
-    adapter = get("api_server_adapter") if callable(get) else None
-    key = getattr(adapter, "_api_key", "") or ""
-    if key:
-        return str(key)
-    return os.environ.get("API_SERVER_KEY", "")
-
-
-def _presented_key(request: web.Request) -> str:
-    auth = request.headers.get("Authorization", "")
-    if auth.lower().startswith("bearer "):
-        return auth[7:].strip()
-    for proto in request.headers.get("Sec-WebSocket-Protocol", "").split(","):
-        proto = proto.strip()
-        if proto.startswith("bearer."):
-            return proto[len("bearer."):]
-    return ""
-
-
-def _is_loopback(request: web.Request) -> bool:
-    try:
-        return ipaddress.ip_address(request.remote or "").is_loopback
-    except ValueError:
-        return False
-
-
-# A reverse proxy or tunnel (cloudflared, nginx, Caddy…) on this machine connects from
-# loopback; these headers say the request really came from elsewhere.
-PROXY_HEADERS = ("CF-Connecting-IP", "CF-Ray", "CF-Visitor", "True-Client-IP", "X-Forwarded-For",
-                 "X-Forwarded-Host", "X-Forwarded-Proto", "X-Real-IP", "Forwarded", "Via")
-
-
-def _is_local(request: web.Request) -> bool:
-    """A client on this machine: loopback and not relayed by a proxy."""
-    return _is_loopback(request) and not any(h in request.headers for h in PROXY_HEADERS)
-
-
-def _peer(request: web.Request) -> str:
-    """For logs only (never for decisions): the client address a proxy reports, else the socket's."""
-    for h in ("CF-Connecting-IP", "True-Client-IP", "X-Real-IP"):
-        if request.headers.get(h):
-            return one_line(request.headers[h], 64)
-    xff = request.headers.get("X-Forwarded-For", "")
-    if xff:
-        return one_line(xff.split(",")[0], 64)
-    return str(request.remote or "?")
-
-
-OWNER = {"kind": "owner"}
-
-
-def authenticate(request: web.Request) -> tuple[web.Response | None, dict | None]:
-    """(refusal, principal). The principal is the owner (API key or, with no key set,
-    loopback) or a paired client token's user. Never logs headers or keys."""
-    presented = _presented_key(request)
-    local = _is_local(request)
-    rec = tokens.verify(presented) if presented.startswith("otr_") else None
-    if rec is not None:
-        if not local and not settings.get("allow_remote"):
-            log.warning("outrigger: refused remote client %s (allow_remote is off)", _peer(request))
-            return web.json_response({"error": "forbidden"}, status=403), None
-        return None, {"kind": "token", **rec}
-    if presented.startswith("otr_"):
-        log.warning("outrigger: bad or revoked token from %s", _peer(request))
-        return web.json_response({"error": "unauthorized"}, status=401), None
-    refusal = authorize(request)
-    return refusal, (None if refusal is not None else OWNER)
-
-
-def authorize(request: web.Request) -> web.Response | None:
-    """None if allowed as the owner. Never logs headers or the key."""
-    key = _expected_key(request)
-    local = _is_local(request)
-    if not key:
-        # No credential configured: only a process on this machine (not via a proxy) may attach.
-        if not local:
-            log.warning("outrigger: refused remote client %s (no key configured)", _peer(request))
-            return web.json_response({"error": "forbidden"}, status=403)
-        if not settings.get("allow_keyless_local"):
-            log.warning("outrigger: refused %s: no key configured and allow_keyless_local is off; "
-                        "configure auth_token or API_SERVER_KEY, or pair a token", _peer(request))
-            return web.json_response({"error": "forbidden"}, status=403)
-        # Fail loud (F-10): this admission rests on a locality heuristic (loopback + no
-        # proxy headers) that a header-less same-host relay can defeat; it is not a
-        # verified local peer. See docs/security-review/auth-trust-boundary.md.
-        log.warning("outrigger: admitted %s as OWNER with no credential (keyless local trust); "
-                    "locality is a heuristic a header-less relay can defeat — configure "
-                    "auth_token/API_SERVER_KEY or set allow_keyless_local=false", _peer(request))
-        return None
-    if not local and not (settings.get("allow_remote") and settings.get("owner_key_remote")):
-        # The API key unlocks the whole gateway; by default it never works from outside.
-        log.warning("outrigger: refused the API key from remote client %s (owner_key_remote is off; use a paired token)",
-                    _peer(request))
-        return web.json_response({"error": "forbidden"}, status=403)
-    # surrogateescape: a header with undecodable bytes must fail the comparison, not raise.
-    if not hmac.compare_digest(_presented_key(request).encode("utf-8", "surrogateescape"),
-                               key.encode("utf-8", "surrogateescape")):
-        log.warning("outrigger: bad or missing key from %s", _peer(request))
-        return web.json_response({"error": "unauthorized"}, status=401)
-    return None
-
-
-def _limited(client: Client) -> bool:
-    """A paired non-admin user (rate-limited, narrower toolsets)."""
-    p = client.principal
-    return p.get("kind") == "token" and not p.get("admin")
-
+# ---------------------------------------------------------------- rate limiting
 
 _RATE: dict[str, list[float]] = {}
 
 
 def _rate_check(client: Client) -> None:
     """Per-user limit on messages that start Hermes turns (chat and // commands)
-    and on notebook doc.list / doc.open (owner/admin exempt)."""
+    and on notebook doc.list / doc.open (owner/admin exempt).
+    user_messages_per_min (default 20; <=0 disables); sliding 60s window keyed
+    by user_id. Over limit -> ProtocolError rate_limited (error frame, the
+    connection stays)."""
     if not _limited(client):
         return
     per_min = int(settings.get("user_messages_per_min") or 0)
@@ -184,7 +86,15 @@ async def _err(ws, code: str, message: str, close: bool = False) -> None:
         await ws.close()
 
 
+# ---------------------------------------------------------------- connection lifecycle
+
 async def ws_handler(request: web.Request) -> web.StreamResponse:
+    """The route handler: authenticate BEFORE upgrade (auth.py), then hello
+    within HELLO_TIMEOUT=10s (else hello_timeout + close), register, welcome,
+    route messages. Keepalive runs alongside; detach always removes the client
+    from registry/platform/notebook. Unexpected handler errors are logged loud
+    (ERROR) and answered with internal_error — the connection survives a bad
+    message."""
     denied, principal = authenticate(request)
     if denied is not None:
         return denied
@@ -195,6 +105,9 @@ async def ws_handler(request: web.Request) -> web.StreamResponse:
     last_seen = time.monotonic()
 
     async def keepalive():
+        """Every PING_INTERVAL=20s: revoked token -> INFO + close 4401 (the ~20s
+        revocation latency, by design); DEAD_AFTER=50s without traffic -> drop;
+        else ping. A failed ping send ends the loop quietly (peer gone)."""
         while not ws.closed:
             await asyncio.sleep(PING_INTERVAL)
             if principal.get("kind") == "token" and not tokens.is_active(principal["id"]):
@@ -267,7 +180,14 @@ async def ws_handler(request: web.Request) -> web.StreamResponse:
     return ws
 
 
+# ---------------------------------------------------------------- routing / ingress decode
+
 def _decode(raw) -> dict | None:
+    """Ingress decode: TEXT frames only, strict JSON (NaN/Infinity refused), a
+    whole-message UTF-8 round-trip rejects lone surrogates once for every field;
+    deep nesting (RecursionError) refused. Invalid -> None (bad_message error
+    frame, connection kept). Frame size bounded by MAX_MSG=4 MiB at the
+    WebSocket layer."""
     if raw.type != WSMsgType.TEXT:
         return None
     try:
@@ -287,6 +207,12 @@ def _no_constant(name):
 
 
 def _register(msg: dict, ws, loop, principal: dict | None = None) -> Client:
+    """Actor: authenticated peer's hello. Input: protocol/client/tools/
+    capabilities. Control: supported protocol, name required (one_line 64),
+    concurrency 1..8 (bools refused), tools via parse_tools; token clients'
+    session_id forced None (API session binding is owner-only). Sink: Client in
+    REGISTRY (caps checked by add, RuntimeError on overflow); a replaced duplicate's socket is closed.
+    Refusals: ProtocolError/RuntimeError -> error frame + close."""
     principal = principal or OWNER
     if msg.get("protocol") not in SUPPORTED_PROTOCOLS:
         raise ProtocolError("bad_protocol", f"supported protocols: {sorted(SUPPORTED_PROTOCOLS)}")
@@ -333,8 +259,15 @@ def _welcome(client: Client, session_id) -> dict:
 _CHAT_ID_RE = __import__("re").compile(r"^[A-Za-z0-9_.:-]{1,128}\Z")
 
 
+# ---------------------------------------------------------------- chat (Outrigger platform)
+
 async def _handle_chat(client: Client, t: str, m: dict, ws) -> None:
-    """Outrigger platform (protocol 2): chat messages go to Hermes's messaging pipeline."""
+    """Outrigger platform (protocol 2): chat messages go to Hermes's messaging pipeline.
+    Actor: client with the 'chat' capability. Control: \\Z-anchored chat_id regex,
+    platform available, owns() for chat.action/chat.stop (cross-chat denial),
+    text non-empty + max_chat_chars cap, _rate_check for non-admin. Sink:
+    platform.inbound (a Hermes turn) / prompt answer. Refusals: ProtocolError ->
+    error frame, connection kept."""
     if "chat" not in client.capabilities:
         raise ProtocolError("no_chat_capability", "declare the 'chat' capability in hello")
     local = m.get("chat_id")
@@ -373,8 +306,16 @@ async def _handle_chat(client: Client, t: str, m: dict, ws) -> None:
     await ws.send_json({"type": "chat.accepted", "chat_id": local, "client_msg_id": mid})
 
 
+# ---------------------------------------------------------------- doc ops (notebook)
+
 async def _handle_doc(client: Client, t: str, m: dict, ws) -> None:
-    """Notebook mode (docs/notebook.md): notes on the Hermes host, `//` commands."""
+    """Notebook mode (docs/notebook.md): notes on the Hermes host, `//` commands.
+    Actor: client with the 'notebook' capability + granted roots. Control:
+    capability + notebook_roots configured + allowed_roots non-empty; every
+    mutating op goes through get()'s grant recheck; list/open/command rate-
+    limited for non-admin; the doc.list walk runs off-loop (F-03). Sink: host
+    .md writes via notebook. NotebookError -> doc.error frame (conflict carries
+    current text/version); OSError -> io_error frame; connection kept."""
     if "notebook" not in client.capabilities:
         raise ProtocolError("no_notebook_capability", "declare the 'notebook' capability in hello")
     if not notebook.enabled():
@@ -470,7 +411,15 @@ def _parse_redaction(raw) -> dict | None:
     return {"enabled": True, "categories": [one_line(c, 20) for c in cats[:20] if isinstance(c, str)]}
 
 
+# ---------------------------------------------------------------- message routing
+
 async def _handle(client: Client, m: dict, ws) -> None:
+    """Route one decoded message from an authenticated client. Control: type
+    must be a short string; bind is owner-only (token clients -> not_allowed);
+    result ingress bounds the untrusted error field (F-07) before resolving the
+    pending future; doc.*/chat.* delegate to their handlers. Unknown type ->
+    ProtocolError; ws_handler's safety net logs unexpected errors loud and keeps
+    the connection."""
     t = m.get("type")
     if not isinstance(t, str) or len(t) > 40:
         raise ProtocolError("bad_message", "type must be a short string")
@@ -489,6 +438,7 @@ async def _handle(client: Client, m: dict, ws) -> None:
     elif t == "context.update":
         client.summary = one_line(m.get("summary", ""), 300)
     elif t == "result":
+        # ---- ingress: bound the untrusted result/error before the model (F-07)
         call_id = m.get("call_id")
         if not isinstance(call_id, str):
             raise ProtocolError("bad_result", "call_id required")
@@ -497,6 +447,8 @@ async def _handle(client: Client, m: dict, ws) -> None:
         # F-07: the error field is client-controlled detail, not a gateway code.
         # Coerce non-strings and bound the length at ingress (defense in depth;
         # dispatch._run sanitizes and caps again before the model sees it).
+        # Invariant: no client-controlled string reaches the model unbounded; ok
+        # content is bounded later in dispatch._format_ok (untrusted label + cap).
         if error is not None and not isinstance(error, str):
             error = json.dumps(error, default=str)
         if isinstance(error, str):

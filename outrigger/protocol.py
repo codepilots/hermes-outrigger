@@ -1,4 +1,15 @@
-"""Wire messages and validation for the outrigger control channel."""
+"""Wire messages and validation for the outrigger control channel.
+
+Trust boundary: untrusted client tool declarations / args -> gateway. Validates
+tool names (\\Z-anchored regex), policies, and JSON Schemas (small, shallow, no
+patternProperties, local-only refs — the gateway never fetches a client-chosen
+URI, an SSRF backstop), and validates model args against the declared schema.
+jsonschema ImportError fails closed (loud) for declarations; args fall back to a
+minimal validator that still refuses non-local refs. Deliberately does NOT:
+authenticate peers (auth.py) or run tools; it only accepts/rejects declarations
+and args. `pattern` is dropped gateway-side (ReDoS) and left to the client.
+"""
+# Audit: see AUDIT.md#security-sensitive-units (input validation)
 from __future__ import annotations
 
 import json
@@ -35,6 +46,12 @@ class ToolDecl:
 
     @classmethod
     def parse(cls, raw: Any) -> "ToolDecl":
+        """Actor: untrusted client hello/tools.update. Input: one raw tool
+        declaration. Control: \\Z-anchored name regex, policy in POLICIES
+        (default confirm — ask the human), parameters via check_schema,
+        positive-int timeout/result caps (bools refused), description capped
+        500. Sink: an accepted ToolDecl in the client catalog. Any failure ->
+        ProtocolError bad_tool; the declaration is refused."""
         if not isinstance(raw, dict):
             raise ProtocolError("bad_tool", "tool declaration must be an object")
         name = raw.get("name")
@@ -64,6 +81,9 @@ class ToolDecl:
 
 
 def parse_tools(raw: Any, limit: int = 64) -> dict[str, ToolDecl]:
+    """The client's whole tool catalog: a list of <=64 declarations, each via
+    ToolDecl.parse; duplicate names collapse last-wins. None -> {}. Refusals:
+    ProtocolError bad_tool (not a list / too many / bad member)."""
     if raw is None:
         return {}
     if not isinstance(raw, list):
@@ -121,7 +141,9 @@ def check_schema(schema: dict) -> str | None:
     """Why a client-declared parameter schema is refused, or None. Hermes's arguments are
     validated against it on the gateway, so it must be small, shallow and regex-free where
     a regex would run on the gateway (patternProperties); `pattern` is left to the client.
-    References must be local '#' fragments: the gateway never fetches a client-chosen URI."""
+    References must be local '#' fragments: the gateway never fetches a client-chosen URI.
+    Caps: <=32 KiB serialized, depth <=24. jsonschema ImportError -> ERROR log +
+    refusal (fail closed; broken install). SchemaError/RecursionError -> refusal string."""
     if _depth(schema) > MAX_SCHEMA_DEPTH:
         return f"nested deeper than {MAX_SCHEMA_DEPTH}"
     try:
@@ -164,7 +186,8 @@ def _local_only_registry():
     """Schema registry that refuses ALL retrieval. Local '#' fragment references resolve
     from the root resource already in the registry, so any URI reaching retrieve is
     non-local by definition; jsonschema's default registry would fetch it with urlopen
-    (http/https/file/ftp, no scheme allowlist, no timeout) — an SSRF / local-file read."""
+    (http/https/file/ftp, no scheme allowlist, no timeout) — an SSRF / local-file read.
+    Any retrieval attempt is WARNING-logged and refused (NoSuchResource)."""
     global _REGISTRY
     if _REGISTRY is None:
         import referencing
@@ -193,7 +216,12 @@ def _validator_cls():
 
 
 def validate_args(schema: dict, args: Any) -> str | None:
-    """Return an error string, or None if args satisfy the JSON Schema."""
+    """Return an error string, or None if args satisfy the JSON Schema. Actor:
+    model args relayed to a client tool (dispatch). Control: non-local ref
+    refused even in the no-jsonschema fallback; jsonschema absent ->
+    _minimal_validate; SchemaError / any evaluation failure -> error string
+    (fail closed, never a pass). Sink: bad args -> outrigger_bad_args, audited
+    by dispatch; nothing reaches the client."""
     remote = _remote_ref(schema)
     if remote is not None:
         # Fail closed even for reference keywords this validator does not evaluate
@@ -225,6 +253,8 @@ _PY_TYPES = {
 
 
 def _type_ok(value: Any, expected) -> bool:
+    """Fallback type check: an unknown type keyword -> False (fail closed, never
+    pass everything); bools are not integers/numbers."""
     names = expected if isinstance(expected, list) else [expected]
     if any(name not in _PY_TYPES for name in names):
         return False  # unknown type keyword: fail closed, never pass everything
@@ -239,7 +269,10 @@ def _type_ok(value: Any, expected) -> bool:
 
 def _minimal_validate(schema: dict, args: Any, path: str = "args") -> str | None:
     """Fallback when jsonschema is not installed: type, enum, required,
-    properties and additionalProperties: false, recursing into objects and arrays."""
+    properties and additionalProperties: false, recursing into objects and arrays.
+    Deliberately partial (no pattern/minimum/$ref evaluation): check_schema already
+    refuses declarations without jsonschema, and validate_args refuses non-local
+    refs before this runs — defense in depth, not the primary gate."""
     if not isinstance(schema, dict):
         return None
     if "type" in schema and not _type_ok(args, schema["type"]):
@@ -291,13 +324,18 @@ def str_field(value: Any, name: str, max_len: int, default: str | None = None) -
 
 
 def one_line(text: Any, limit: int) -> str:
-    """Single line, no control characters: safe to splice into model context."""
+    """Single line, no control characters: safe to splice into model context.
+    Actor: untrusted text (client names, log peers, reviewer reasons). Control:
+    control chars -> space, whitespace collapsed, hard cap `limit`."""
     text = _CTRL_RE.sub(" ", str(text))
     return _WS_RE.sub(" ", text).strip()[:limit]
 
 
 def sanitize_text(text: str, limit: int) -> tuple[str, bool]:
-    """Strip control characters and cap length. Returns (text, truncated)."""
+    """Strip control characters and cap length. Returns (text, truncated). The
+    untrusted-result bound (F-07): dispatch applies it to client results and
+    error detail before the model sees them; the ok path surfaces truncated=True
+    so a cut result is visible, never silent."""
     text = _CTRL_RE.sub("", text)
     if len(text) > limit:
         return text[:limit], True

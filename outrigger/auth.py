@@ -1,0 +1,174 @@
+"""Authentication and admission for the outrigger WebSocket route.
+
+Responsibility: decide WHO may attach — resolve the expected credential
+(plugin auth_token > the gateway adapter's resolved key > env API_SERVER_KEY),
+read the presented key/token, verify paired tokens, and admit the owner via API
+key or (only when no key resolves anywhere AND allow_keyless_local) the locality
+heuristic. Trust boundary: untrusted WS peer -> gateway control surface. The
+locality check (loopback AND no proxy headers) is a HEURISTIC a header-less
+same-host relay can defeat, not verified peer identity (F-10 residual).
+
+Deliberately does NOT: route messages, rate-limit, register clients, or bound
+results (those stay in ws.py); it does not sandbox client tool execution and does
+not log keys or credential headers (the peer address in warnings is
+proxy-header-derived, bounded via one_line). ws.py re-exports every name here so ws.<name> stays
+resolvable and identical.
+"""
+# Audit: see AUDIT.md#security-sensitive-units (authentication / admission)
+from __future__ import annotations
+
+import hmac
+import ipaddress
+import logging
+import os
+
+from aiohttp import web
+
+from . import settings, tokens
+from .protocol import one_line
+from .registry import Client
+
+log = logging.getLogger("hermes.plugins.outrigger")
+
+
+def _expected_key(request: web.Request | None = None) -> str:
+    """The credential this route expects: the plugin's auth_token, else the gateway's
+    OWN resolved key (the live api_server adapter reads extra['key'], profile-scoped
+    secrets and env at startup and is exposed as app['api_server_adapter']), else raw
+    env API_SERVER_KEY. Consulting the adapter's resolved key keeps a config-keyed
+    gateway from falling into keyless local-owner trust (F-10). Never logs the key."""
+    token = settings.get("auth_token")
+    if token:
+        return token
+    app = getattr(request, "app", None)
+    get = getattr(app, "get", None)
+    adapter = get("api_server_adapter") if callable(get) else None
+    key = getattr(adapter, "_api_key", "") or ""
+    if key:
+        return str(key)
+    return os.environ.get("API_SERVER_KEY", "")
+
+
+def _presented_key(request: web.Request) -> str:
+    """Actor: untrusted WS peer. Input: Authorization: Bearer header, else a
+    bearer.<token> Sec-WebSocket-Protocol entry. Control: extraction only —
+    verification happens in authenticate. Sink: the presented credential
+    string ("" when absent). Never logs the value."""
+    auth = request.headers.get("Authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    for proto in request.headers.get("Sec-WebSocket-Protocol", "").split(","):
+        proto = proto.strip()
+        if proto.startswith("bearer."):
+            return proto[len("bearer."):]
+    return ""
+
+
+def _is_loopback(request: web.Request) -> bool:
+    """Socket peer address parses as loopback; absent/unparseable -> False
+    (fail closed). One half of the _is_local heuristic — not verified peer
+    identity (F-10 residual)."""
+    try:
+        return ipaddress.ip_address(request.remote or "").is_loopback
+    except ValueError:
+        return False
+
+
+# A reverse proxy or tunnel (cloudflared, nginx, Caddy…) on this machine connects from
+# loopback; these headers say the request really came from elsewhere.
+PROXY_HEADERS = ("CF-Connecting-IP", "CF-Ray", "CF-Visitor", "True-Client-IP", "X-Forwarded-For",
+                 "X-Forwarded-Host", "X-Forwarded-Proto", "X-Real-IP", "Forwarded", "Via")
+
+
+def _is_local(request: web.Request) -> bool:
+    """A client on this machine: loopback AND no PROXY_HEADERS present. A
+    HEURISTIC, not verified peer identity — a header-less same-host relay
+    (ssh -L, socat, bare proxy_pass) looks local (F-10 residual)."""
+    return _is_loopback(request) and not any(h in request.headers for h in PROXY_HEADERS)
+
+
+def _peer(request: web.Request) -> str:
+    """For logs only (never for decisions): the client address a proxy reports, else the socket's.
+    Proxy-reported values are peer-controlled; one_line(..., 64) bounds them for log splicing."""
+    for h in ("CF-Connecting-IP", "True-Client-IP", "X-Real-IP"):
+        if request.headers.get(h):
+            return one_line(request.headers[h], 64)
+    xff = request.headers.get("X-Forwarded-For", "")
+    if xff:
+        return one_line(xff.split(",")[0], 64)
+    return str(request.remote or "?")
+
+
+OWNER = {"kind": "owner"}
+
+
+def authenticate(request: web.Request) -> tuple[web.Response | None, dict | None]:
+    """(refusal, principal) gating the session bind. Actor: untrusted WS peer at
+    upgrade. Input: presented key/token + locality. Control: otr_ tokens ->
+    tokens.verify (constant-time), remote needs allow_remote (default false);
+    otherwise authorize() decides owner admission. Invariant: only a verified
+    token user or the owner may attach. Failures: WARNING + 401 (bad/revoked
+    token), WARNING + 403 (remote token, allow_remote off). Never logs keys or
+    credential headers; the warning's peer address is proxy-header-derived, bounded."""
+    presented = _presented_key(request)
+    local = _is_local(request)
+    rec = tokens.verify(presented) if presented.startswith("otr_") else None
+    if rec is not None:
+        if not local and not settings.get("allow_remote"):
+            log.warning("outrigger: refused remote client %s (allow_remote is off)", _peer(request))
+            return web.json_response({"error": "forbidden"}, status=403), None
+        return None, {"kind": "token", **rec}
+    if presented.startswith("otr_"):
+        log.warning("outrigger: bad or revoked token from %s", _peer(request))
+        return web.json_response({"error": "unauthorized"}, status=401), None
+    refusal = authorize(request)
+    return refusal, (None if refusal is not None else OWNER)
+
+
+def authorize(request: web.Request) -> web.Response | None:
+    """None if allowed as the owner. Actor: untrusted peer; input: expected key
+    (_expected_key) + locality. Control/sink: no key anywhere -> local-only AND
+    allow_keyless_local (default true, opt-out), admitted with a loud WARNING
+    (locality heuristic, F-10); keyed -> constant-time compare, remote needs
+    allow_remote AND owner_key_remote (both default false). Invariant: the API
+    key unlocks the whole gateway, so by default it never works remotely or
+    keyless. Failures: WARNING + 403 (remote / keyless-off), WARNING + 401
+    (bad/missing key). Never logs keys or credential headers; the warning's peer
+    address is proxy-header-derived, bounded."""
+    key = _expected_key(request)
+    local = _is_local(request)
+    if not key:
+        # No credential configured: only a process on this machine (not via a proxy) may attach.
+        if not local:
+            log.warning("outrigger: refused remote client %s (no key configured)", _peer(request))
+            return web.json_response({"error": "forbidden"}, status=403)
+        if not settings.get("allow_keyless_local"):
+            log.warning("outrigger: refused %s: no key configured and allow_keyless_local is off; "
+                        "configure auth_token or API_SERVER_KEY, or pair a token", _peer(request))
+            return web.json_response({"error": "forbidden"}, status=403)
+        # Fail loud (F-10): this admission rests on a locality heuristic (loopback + no
+        # proxy headers) that a header-less same-host relay can defeat; it is not a
+        # verified local peer. See docs/security-review/auth-trust-boundary.md.
+        log.warning("outrigger: admitted %s as OWNER with no credential (keyless local trust); "
+                    "locality is a heuristic a header-less relay can defeat — configure "
+                    "auth_token/API_SERVER_KEY or set allow_keyless_local=false", _peer(request))
+        return None
+    if not local and not (settings.get("allow_remote") and settings.get("owner_key_remote")):
+        # The API key unlocks the whole gateway; by default it never works from outside.
+        log.warning("outrigger: refused the API key from remote client %s (owner_key_remote is off; use a paired token)",
+                    _peer(request))
+        return web.json_response({"error": "forbidden"}, status=403)
+    # surrogateescape: a header with undecodable bytes must fail the comparison, not raise.
+    if not hmac.compare_digest(_presented_key(request).encode("utf-8", "surrogateescape"),
+                               key.encode("utf-8", "surrogateescape")):
+        log.warning("outrigger: bad or missing key from %s", _peer(request))
+        return web.json_response({"error": "unauthorized"}, status=401)
+    return None
+
+
+def _limited(client: Client) -> bool:
+    """A paired non-admin user (rate-limited, narrower toolsets). Reads the
+    principal assigned at registration (authenticate); owner and admin tokens
+    are exempt from _rate_check."""
+    p = client.principal
+    return p.get("kind") == "token" and not p.get("admin")

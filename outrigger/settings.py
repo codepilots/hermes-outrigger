@@ -1,4 +1,12 @@
-"""Plugin settings, filled from plugins.entries.outrigger.settings at register()."""
+"""Plugin settings, filled from plugins.entries.outrigger.settings at register().
+
+Trust boundary: operator config -> trust switches. Bool-typed settings are
+coerced via _as_bool (quoted "false"/0/1 normalized); an unrecognized value logs
+loud and uses the declared default (fail closed for refusal switches such as
+allow_keyless_local / allow_remote / owner_key_remote). Deliberately does NOT:
+authenticate or enforce — it only resolves the switches the security modules read.
+"""
+# Audit: see AUDIT.md#security-sensitive-units (trust settings / bool coercion)
 from __future__ import annotations
 
 import logging
@@ -13,6 +21,11 @@ _BOOL_FALSE = {"false", "0", "no", "off", ""}
 
 
 def _as_bool(key: str, value, default: bool) -> bool:
+    """Fail-closed bool coercion for trust switches. Actor: operator config
+    (possibly quoted YAML strings / 0/1). Control: true/false-ish strings and
+    0/1 normalized; anything unrecognized -> loud WARNING naming key/value/
+    default, then the DECLARED default — so a quoted "false" can never leave
+    allow_keyless_local / allow_remote / owner_key_remote on."""
     if isinstance(value, bool):
         return value
     if isinstance(value, str):
@@ -55,8 +68,8 @@ DEFAULTS = {
     "allow_subagents": False,
     "review": "smart",  # smart: LLM reviewer for non-auto calls; off: none
     "review_timeout_s": 30,
-    "review_policy": "",
-    "review_deny": "ask",
+    "review_policy": "",  # extra trusted rules appended to the reviewer prompt
+    "review_deny": "ask",  # ask: a deny goes to the user as a flagged prompt; block: final
     # Notebook mode: {"name": "~/path"} roots whose .md notes the owner's clients may open.
     "notebook_roots": {},
     "notebook_roots_for": {},  # paired users' roots: {"ann": ["shared"]} or {"ann": "*"}; the owner gets all
@@ -68,14 +81,16 @@ DEFAULTS = {
     # Slash commands paired (non-admin) token users may run, beyond Hermes's /help and /whoami.
     # /model and /reasoning are left out: with --global they rewrite config.yaml.
     "user_allowed_commands": ["status", "new", "stop", "retry", "undo", "title", "usage", "queue", "q",
-                              "btw", "save", "context", "commands", "sessions", "resume"],  # ask: a deny goes to the user as a flagged prompt; block: final  # extra trusted rules appended to the reviewer prompt
+                              "btw", "save", "context", "commands", "sessions", "resume"],
 }
 
 SETTINGS: dict = dict(DEFAULTS)
 
 
 def load(get_config) -> None:
-    """get_config is ctx.get_config(key, default)."""
+    """get_config is ctx.get_config(key, default). Reads every DEFAULTS key; a
+    raising get_config falls back to the declared default; bool-typed keys go
+    through _as_bool (unrecognized -> WARNING + default, fail closed)."""
     for key, default in DEFAULTS.items():
         try:
             raw = get_config(key, default)
@@ -85,4 +100,6 @@ def load(get_config) -> None:
 
 
 def get(key: str):
+    """The resolved switch value; falls back to the declared default when a key
+    was never loaded. Security modules read every trust switch through this."""
     return SETTINGS.get(key, DEFAULTS[key])

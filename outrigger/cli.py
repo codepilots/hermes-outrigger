@@ -1,4 +1,9 @@
-"""`hermes outrigger …`: pair, list and revoke client tokens (ctx.register_cli_command)."""
+"""`hermes outrigger …`: pair, list and revoke client tokens (ctx.register_cli_command).
+
+Trust boundary: owner CLI -> token store. Mints (shown once), lists (never shows
+secrets) and revokes tokens via tokens.py. Deliberately does NOT: accept remote
+input or authenticate the gateway — it is the owner's local pairing surface.
+"""
 from __future__ import annotations
 
 import time
@@ -21,6 +26,10 @@ def setup(subparser) -> None:
 
 
 def handle(args) -> int:
+    """Owner-only CLI dispatch: pair (mint, print the shown-once token), tokens
+    (list, never secrets), revoke (timestamp; live connections close within
+    ~20s). ValueError from mint -> error message + exit 2, nothing stored. No
+    remote input reaches this surface."""
     cmd = getattr(args, "outrigger_command", None)
     if cmd == "pair":
         try:

@@ -1,4 +1,14 @@
-"""Append-only JSONL audit log. Args are hashed unless audit_args is set."""
+"""Append-only JSONL audit log. Args are hashed unless audit_args is set.
+
+Responsibility: the audit trail for client tool calls (record) and the capture
+artifact writer (_save_capture) that saves a client-returned image to a 0600 file
+for Hermes's vision tool. Trust boundary: gateway -> owner-only audit artifacts.
+A lost write (OSError) never breaks a tool call but is logged loud and counted
+(_write_failures). Deliberately does NOT: cap or hash-chain the trail (it grows
+unbounded; offline edits are undetectable), or audit notebook edits / platform
+chat (those are outside audit.jsonl scope). dispatch.py calls record / _save_capture.
+"""
+# Audit: see AUDIT.md#security-sensitive-units (audit trail / capture artifacts)
 from __future__ import annotations
 
 import hashlib
@@ -20,12 +30,22 @@ _write_failures = 0
 
 
 def _path() -> Path:
+    """audit.jsonl under $HERMES_HOME/plugin-data/outrigger (owner-only by
+    creation mode 0600; grows unbounded — no rotation, F-09 residual)."""
     home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
     return home / "plugin-data" / "outrigger" / "audit.jsonl"
 
 
 def record(*, session_id, client, tool, args, policy, outcome, duration_s, review=None,
            principal=None) -> None:
+    """Actor: dispatch (every tool-call outcome, incl. pre-client rejections).
+    Input: session/client/tool/args/policy/outcome + client.principal identity.
+    Control: args stored as SHA-256 only unless audit_args=true (opt-in, default
+    false); no secrets/keys. Sink: append to audit.jsonl, created 0600
+    (creation-only: a pre-existing file keeps its mode). Fail-loud write-loss
+    contract: OSError -> ERROR with path/reason/tool/session/outcome +
+    _write_failures counter; the entry is lost but the tool call CONTINUES
+    (auditing never breaks a call). No rotation/hash-chain (F-09 residual)."""
     entry = {
         "ts": round(time.time(), 3),
         "session": session_id,
@@ -63,3 +83,52 @@ def record(*, session_id, client, tool, args, policy, outcome, duration_s, revie
         log.error("outrigger: AUDIT WRITE FAILED (%d so far) to %s: %s — entry for tool %r "
                   "(session %s, outcome %s) was NOT recorded; tool calls continue but the "
                   "audit trail is incomplete", n, p, e, tool, session_id, outcome)
+
+
+# ---------------------------------------------------------------- capture artifacts
+
+CAPTURE_TYPES = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}
+MAX_CAPTURE_BYTES = 8 * 1024 * 1024
+KEEP_CAPTURES = 20
+
+
+def _save_capture(image) -> dict:
+    """A client tool returned an image ({mime, data: base64}). A plugin tool's result is text
+    to the model, so the image is saved as a file and Hermes is told to open it with its
+    vision_analyze tool (which shows it natively on vision-capable models, else describes it).
+    Actor: untrusted client result. Control: png/jpeg/webp only, strict base64,
+    <=8 MiB, magic bytes must match the declared mime. Sink: 0600 capture file
+    (creation-only mode), oldest beyond KEEP_CAPTURES=20 pruned. Any check fails
+    -> {"image_error": ...} in the result (refused, not written); the model never
+    receives the raw bytes."""
+    import base64
+    import os
+    import secrets
+    import time
+    from pathlib import Path
+    mime = str(image.get("mime", "")).lower() if isinstance(image, dict) else ""
+    ext = CAPTURE_TYPES.get(mime)
+    if not ext or not isinstance(image.get("data"), str):
+        return {"image_error": "unsupported image (png, jpeg or webp, base64)"}
+    try:
+        raw = base64.b64decode(image["data"], validate=True)
+    except Exception:
+        return {"image_error": "invalid base64"}
+    if len(raw) > MAX_CAPTURE_BYTES:
+        return {"image_error": f"image larger than {MAX_CAPTURE_BYTES // (1024 * 1024)} MB"}
+    # The declared type must match the bytes (they're handed to Hermes's vision tool).
+    magic = {".png": raw[:8] == b"\x89PNG\r\n\x1a\n", ".jpg": raw[:3] == b"\xff\xd8\xff",
+             ".webp": raw[:4] == b"RIFF" and raw[8:12] == b"WEBP"}
+    if not magic.get(ext, False):
+        return {"image_error": f"data is not a {mime} image"}
+    home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
+    folder = home / "plugin-data" / "outrigger" / "captures"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(3)}{ext}"
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(raw)
+    for old in sorted(folder.iterdir(), key=lambda p: p.stat().st_mtime)[:-KEEP_CAPTURES]:
+        old.unlink(missing_ok=True)
+    return {"image_path": str(path), "bytes": len(raw),
+            "hint": "Open it with vision_analyze (image_url = image_path) to look at it."}
