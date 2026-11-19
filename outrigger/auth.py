@@ -10,7 +10,8 @@ same-host relay can defeat, not verified peer identity (F-10 residual).
 
 Deliberately does NOT: route messages, rate-limit, register clients, or bound
 results (those stay in ws.py); it does not sandbox client tool execution and does
-not log keys or headers. ws.py re-exports every name here so ws.<name> stays
+not log keys or credential headers (the peer address in warnings is
+proxy-header-derived, bounded via one_line). ws.py re-exports every name here so ws.<name> stays
 resolvable and identical.
 """
 # Audit: see AUDIT.md#security-sensitive-units (authentication / admission)
@@ -107,7 +108,8 @@ def authenticate(request: web.Request) -> tuple[web.Response | None, dict | None
     tokens.verify (constant-time), remote needs allow_remote (default false);
     otherwise authorize() decides owner admission. Invariant: only a verified
     token user or the owner may attach. Failures: WARNING + 401 (bad/revoked
-    token), WARNING + 403 (remote token, allow_remote off). Never logs headers or keys."""
+    token), WARNING + 403 (remote token, allow_remote off). Never logs keys or
+    credential headers; the warning's peer address is proxy-header-derived, bounded."""
     presented = _presented_key(request)
     local = _is_local(request)
     rec = tokens.verify(presented) if presented.startswith("otr_") else None
@@ -131,7 +133,8 @@ def authorize(request: web.Request) -> web.Response | None:
     allow_remote AND owner_key_remote (both default false). Invariant: the API
     key unlocks the whole gateway, so by default it never works remotely or
     keyless. Failures: WARNING + 403 (remote / keyless-off), WARNING + 401
-    (bad/missing key). Never logs headers or the key."""
+    (bad/missing key). Never logs keys or credential headers; the warning's peer
+    address is proxy-header-derived, bounded."""
     key = _expected_key(request)
     local = _is_local(request)
     if not key:

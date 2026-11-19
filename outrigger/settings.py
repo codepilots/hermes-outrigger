@@ -68,8 +68,8 @@ DEFAULTS = {
     "allow_subagents": False,
     "review": "smart",  # smart: LLM reviewer for non-auto calls; off: none
     "review_timeout_s": 30,
-    "review_policy": "",
-    "review_deny": "ask",
+    "review_policy": "",  # extra trusted rules appended to the reviewer prompt
+    "review_deny": "ask",  # ask: a deny goes to the user as a flagged prompt; block: final
     # Notebook mode: {"name": "~/path"} roots whose .md notes the owner's clients may open.
     "notebook_roots": {},
     "notebook_roots_for": {},  # paired users' roots: {"ann": ["shared"]} or {"ann": "*"}; the owner gets all
@@ -81,7 +81,7 @@ DEFAULTS = {
     # Slash commands paired (non-admin) token users may run, beyond Hermes's /help and /whoami.
     # /model and /reasoning are left out: with --global they rewrite config.yaml.
     "user_allowed_commands": ["status", "new", "stop", "retry", "undo", "title", "usage", "queue", "q",
-                              "btw", "save", "context", "commands", "sessions", "resume"],  # ask: a deny goes to the user as a flagged prompt; block: final  # extra trusted rules appended to the reviewer prompt
+                              "btw", "save", "context", "commands", "sessions", "resume"],
 }
 
 SETTINGS: dict = dict(DEFAULTS)

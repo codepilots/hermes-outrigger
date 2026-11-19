@@ -5,12 +5,13 @@ offer tools that run on the client, not on the Hermes host. Hermes calls them as
 ordinary tool calls; the plugin relays each call to the client and returns the
 client's result as the tool result, inside the same turn.
 
-Status: plugin side of M1-M3 complete (protocol, multi-client, subagent
-blocking, progress events, audit log, Python reference client, 51 tests). Verified
-end to end on Hermes v0.23.1 (2026-11-16): a client tool called mid-turn with
-its result in the same reply, audit entry written, and delegated subagents
-refused. M2's browser UI lives in the Hermes
-Sidebar repo; M4 (pairing tokens) is not started.
+Status: M1-M4 complete (protocol, multi-client, subagent blocking, progress
+events, audit log, pairing tokens, Python reference client). Security review
+and remediation shipped as 0.2.0 (docs/security-review/); the human-audit
+refactor adds AUDIT.md and a CI documentation gate. Suite: 393 passed,
+1 skipped. Verified end to end on Hermes v0.23.1 (2026-11-16): a client tool
+called mid-turn with its result in the same reply, audit entry written, and
+delegated subagents refused. M2's browser UI lives in the Hermes Sidebar repo.
 
 Install (dev):
 
@@ -48,9 +49,12 @@ everyone with a note open sees who else is in it. See docs/notebook.md.
 `outrigger_call` is offered in every session once the toolset is enabled, so a
 client can attach before or after the conversation starts; with no client
 attached, calls fail fast.
-Set `API_SERVER_KEY` (or `plugins.entries.outrigger.settings.auth_token`); with
-neither set, only loopback clients may attach.
-Tests: `python -m venv .venv && .venv/bin/pip install aiohttp jsonschema pytest-aiohttp && .venv/bin/pytest`.
+Set `API_SERVER_KEY` (or `plugins.entries.outrigger.settings.auth_token`); the
+gateway's own resolved key (platform config/secret) also counts. With no key
+resolved anywhere, only loopback clients may attach (`allow_keyless_local`,
+default on — a locality heuristic, not verified peer identity; see
+docs/security-review/auth-trust-boundary.md).
+Tests: `python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt && .venv/bin/python -m pytest tests/ -q`.
 Reference client: `clients/python_client.py`.
 
 - docs/spec.md: design, protocol, security model, open questions
@@ -58,11 +62,12 @@ Reference client: `clients/python_client.py`.
 - docs/platform.md: proposal for the Outrigger platform, which makes clients a full Hermes messaging platform (slash commands, model picker, approvals)
 - docs/notebook.md: proposal for Notebook mode: edit Markdown notes on the Hermes host from a client, with `//` lines as commands to Hermes
 
-The first client will be the Hermes Sidebar Chromium extension
-(github.com/codepilots/hermes-sidebar), exposing page tools such as run_js.
+The first client is the Hermes Sidebar extension
+(github.com/codepilots/hermes-sidebar), on Chromium and Firefox, exposing page
+tools such as run_js.
 
 Name: an outrigger is a float rigged alongside a hull that extends a boat's
 reach and steadies it. The plugin does the same for Hermes: a light attachment
-that lets it act where the hull cannot go.
+that lets it act where the hull doesn't reach.
 
 License: MIT. See LICENSE.

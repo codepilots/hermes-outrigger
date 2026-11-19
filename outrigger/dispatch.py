@@ -7,8 +7,11 @@ resolves it from the gateway loop.
 Trust boundary: model -> gateway -> client device -> model. Selects the client
 (subagent gate via registry), validates args, runs the advisory reviewer, relays
 the call, and bounds/sanitizes the untrusted result before the model sees it
-(F-07). Every outcome is audited (audit.record); capture images go to
-audit._save_capture. Deliberately does NOT: execute the tool (the client does),
+(F-07). Every outcome is audited (audit.record): principal=client.principal
+once a client is picked, None for pre-client rejections. One documented
+exception: an OSError in the capture writer (audit._save_capture) propagates
+and skips that call's audit record — fail loud via the ws handler safety net;
+hardening follow-up logged. Capture images go to audit._save_capture. Deliberately does NOT: execute the tool (the client does),
 or make the reviewer's deny final unless review_deny="block" (default advisory).
 """
 # Audit: see AUDIT.md#security-sensitive-units (dispatch relay / result bounding)

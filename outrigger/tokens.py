@@ -43,8 +43,11 @@ def path() -> Path:
 
 def _load() -> dict:
     """Read the store, cached by (path, mtime_ns) so pairing/revoking needs no
-    restart. Missing file -> empty store. Corrupt/unreadable JSON -> empty store
-    (fail closed: no token verifies). Hashes only — no secret is read from disk."""
+    restart. Missing file -> empty store. Unreadable or dict-shaped corrupt JSON ->
+    empty store (fail closed: no token verifies). Non-dict JSON raises instead
+    (also fail closed: the handshake errors out, no token verifies); routing it
+    through the empty-store path is a logged hardening follow-up. Hashes only —
+    no secret is read from disk."""
     p = path()
     try:
         key = (str(p), p.stat().st_mtime_ns)

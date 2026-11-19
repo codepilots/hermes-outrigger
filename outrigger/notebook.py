@@ -8,7 +8,8 @@ only on that note during that command; the note is locked for the user meanwhile
 
 Trust boundary: untrusted client / collaborator-written note text -> host .md
 files. Access control (allowed_roots / resolve / get) re-checks root grants on
-every client operation; the model-facing tool handlers live in notebook_tools.py
+every content-access operation (open/list/update/undo/command); doc.close
+releases without a recheck. The model-facing tool handlers live in notebook_tools.py
 (re-exported lazily below). Deliberately does NOT: sandbox note content (it is
 labeled untrusted, the model still reads it), audit edits to audit.jsonl (notebook
 edits are outside that trail), or decide admission (auth.py / ws.py).
@@ -69,8 +70,10 @@ def roots() -> dict[str, Path]:
 def allowed_roots(client) -> set[str]:
     """Roots this client's user may use: the owner gets all; a paired token's user gets the
     roots listed for them in notebook_roots_for ({"ann": ["shared"]}, or "*" for all;
-    default {} = none). Invariant: a token user never sees an ungranted root; get()
-    re-checks this on every operation, so narrowing revokes held-open docs (F-05)."""
+    default {} = none). Invariant: allowed_roots never returns an ungranted root;
+    get() re-checks on every content-access operation, so narrowing revokes
+    held-open docs (F-05). Residual: broadcast still delivers held-open doc
+    changes until close/disconnect."""
     available = set(roots())
     p = getattr(client, "principal", {"kind": "owner"})
     if p.get("kind") == "owner":

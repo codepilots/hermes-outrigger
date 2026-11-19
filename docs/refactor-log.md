@@ -112,3 +112,60 @@ improved deltas.
   prose, no padding, existing honest content preserved (decided F-05 window,
   F-10 heuristic caveats). AUDIT.md anchors remapped in the same tree
   (docstring lines shift anchors — the freshness mechanism as designed).
+
+### Step 3 — verified + committed
+- Child: 84 functions documented (85 edits), 15/15 ast-identity, 393×2,
+  212 anchor occurrences remapped, 6/6 renders, SyntaxWarning-clean.
+- **Parent verification (independent):** own ast-identity probe
+  (`verify_docstring_pass_parent.py`, NodeTransformer docstring strip) —
+  **15/15 modules identical**; suite 393 passed ×2; compile clean under
+  -W error::SyntaxWarning; 250 anchor assertions pass; gate script hard PASS;
+  6/6 diagrams re-rendered; docstring spot-reads (authenticate, get,
+  mark_subagent) honest and code-matching; fences clean.
+- Commit: `9050391`.
+
+### Step 4 — claims pass (in progress)
+- README.md:66 metaphor reworded ("cannot go" → "doesn't reach") — the only
+  overclaim-grep hit on shipping surfaces; keeps the strict gate clean.
+- Delegation `deleg_489c616a`: fresh READ-ONLY claims reviewer — every AUDIT.md
+  table row / diagram node-edge / failure contract / residual, all 84 docstrings
+  (config defaults vs settings.DEFAULTS + plugin.yaml, log levels, invariants,
+  actor/sink), cross-item interactions, manifest/README claims, overclaim
+  adjudication incl. docstrings, 20 highest-risk anchor semantics. Decided
+  behaviors (F-05 window, F-10 residuals, advisory deny, ~20s latency) fenced
+  against false findings. Parent adjudicates + fixes; parent also spot-checks
+  high-risk claims independently.
+
+### Step 4 — claims pass: findings, adjudications, fixes
+- Reviewer (`deleg_489c616a`, read-only): verdict **findings** — 11 total
+  (2 OVERCLAIM, 1 STALE, 8 NIT), zero WRONG. Verified correct: all 6 diagrams'
+  nodes/edges vs real call order, 38 table rows, 13 failure contracts, 28 config
+  defaults vs settings.DEFAULTS + plugin.yaml, 110 anchors in-bounds, 20/20
+  highest-risk anchor semantics, re-export identity, subagent denial in both
+  dispatch and notebook_tools, decided behaviors fenced. Overclaim grep: all
+  hits adjudicated keep (qualified/config-named/metaphor/identifier).
+- **Adjudications:**
+  - F-01 (tokens._load non-dict JSON raises, not empty-store) and F-02
+    (capture-write OSError skips audit.record): real behavior gaps, but both
+    still fail CLOSED and loud. Fixing them is a functional change → NOT done
+    in this refactor (skill rule: refactor ≠ remediate; owner directive:
+    functional changes to discuss). Docstrings/AUDIT.md reworded to the true
+    behavior; both logged as hardening follow-ups for the next remediation
+    pass (AUDIT.md residuals + this log). **Owner decision pending.**
+  - F-03..F-11 (principal=None wording, stale README status block, diagram (a)
+    count_call ordering + omitted decl lookup, ingress coerce-vs-sanitize,
+    settings.py misplaced comments, "never logs headers" vs bounded proxy-peer
+    logging, "every client operation" vs close, allowed_roots "never sees" vs
+    broadcast residual, README key-source omission): all fixed as doc/comment/
+    README/diagram corrections. README also refreshed: test command now uses
+    requirements-dev.txt; first-client line now present tense (Chromium+Firefox).
+- **Parent verification:** 16 patches applied; ast-identity 6/6 modified modules
+  (docstrings/comments only — settings comment move included); suite 393×2;
+  256 anchor assertions (110 unique); strict overclaim gate PASS (one new
+  "safety net" metaphor in the residual bullet reworded to keep the gate clean);
+  all 6 diagrams re-rendered incl. the corrected sequence.
+- **Hardening follow-ups for the next remediation pass (functional, owner call):**
+  1. Guard `_save_capture` OSError → image_error field so the call completes
+     audited (closes the audit-trail escape).
+  2. `tokens._load`: isinstance(data, dict) guard so non-dict JSON takes the
+     documented empty-store path.

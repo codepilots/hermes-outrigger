@@ -5,7 +5,8 @@ detach), message routing, per-user rate limiting, chat and notebook doc ops, and
 ingress result/error bounding. Trust boundary: untrusted WS peer -> gateway
 control surface. Admission is decided in auth.py (re-exported here so ws.<name>
 stays resolvable and identical); this module only routes already-authenticated
-peers and never logs keys or headers.
+peers and never logs keys or credential headers (warning peer addresses are
+proxy-header-derived, bounded via one_line).
 
 Deliberately does NOT: decide admission (auth.py), execute client tools (the
 owner's device does, the plugin relays), or write note files (notebook.py). It

@@ -95,7 +95,7 @@ not imply the control holds across a whole deployment.
 | Args validation | model → gateway → client | `validate_args` against the declared schema; non-local ref refused even in the no-jsonschema fallback; `pattern` keyword dropped gateway-side (ReDoS); unknown type keyword fails closed; fallback `_minimal_validate` when jsonschema absent. Bad args → `outrigger_bad_args`, audited. | client tool call | `outrigger/protocol.py:218-241`, `outrigger/protocol.py:204-215`, `outrigger/protocol.py:255-301`, `outrigger/dispatch.py:130-133` |
 | Name / chat-id regexes | untrusted → gateway | `_NAME_RE` and `_CHAT_ID_RE` use `\Z` (trailing LF rejected, F-11); `TOKEN_RE`/`USER_RE` likewise. | tool routing / chat routing | `outrigger/protocol.py:27`, `outrigger/ws.py:258`, `outrigger/tokens.py:33-34` |
 | Reviewer approval | model → gateway → client | For policy ≠ auto AND `review="smart"` (default) with an LLM available: args serialized first; over `ARGS_BUDGET`=8000 or unserializable → forced `escalate` before any model call (fail closed). Verdicts approve/deny/escalate are **advisory** and travel with the call; a `deny` is final gateway-side **only** when `review_deny="block"` (opt-in; default `"ask"`). Reviewer failure / no verdict → escalate. | call relay or refusal | `outrigger/reviewer.py:111-184`, `outrigger/reviewer.py:40-47`, `outrigger/dispatch.py:141-158`, `outrigger/settings.py:69-72` |
-| Dispatch relay + error cap + audit | gateway → client → model | Per-client semaphore (concurrency 1..8), per-turn call cap `max_calls_per_turn` (default 20), timeout `min(decl, max_timeout_s=400)`. Ok results labeled untrusted + capped `min(decl.max_result_chars, max_result_chars=20000)`; error field coerced/sanitized/capped at ingress and again in `_run` (F-07). Every outcome incl. pre-client rejections audited with `client.principal`. | model tool result | `outrigger/dispatch.py:93-227`, `outrigger/dispatch.py:230-243`, `outrigger/ws.py:439-457`, `outrigger/audit.py:39-85` |
+| Dispatch relay + error cap + audit | gateway → client → model | Per-client semaphore (concurrency 1..8), per-turn call cap `max_calls_per_turn` (default 20), timeout `min(decl, max_timeout_s=400)`. Ok results labeled untrusted + capped `min(decl.max_result_chars, max_result_chars=20000)`; error field coerced + capped at ingress, then sanitized + capped again in `_run` (F-07). Every outcome audited — `client.principal` once a client is picked, `principal=None` for pre-client rejections; one documented exception: a capture-write OSError in `_save_capture` propagates and skips that call's audit record (fail loud; hardening follow-up). | model tool result | `outrigger/dispatch.py:93-227`, `outrigger/dispatch.py:230-243`, `outrigger/ws.py:439-457`, `outrigger/audit.py:39-85` |
 | Notebook open / get / update / command | untrusted → host files | `allowed_roots` (owner: all; token user: `notebook_roots_for` grant, default `{}` = none). `resolve` blocks `..`/absolute/hidden/out-of-root symlink, `.md` only. `get()` re-checks the resolved location against granted roots' directories **every operation** (F-05 narrowing revokes client writes). Doc keyed by resolved file identity (one mutex/lock/version). Caps `MAX_OPEN_DOCS`=64 / `MAX_DOCS_PER_CLIENT`=16; LRU evicts only clientless+unlocked, else refuses. Lock + version conflict checks; `doc.list` walk bounded (5000) off-loop; rate limit on list/open/command for non-admin. | host `.md` write | `outrigger/notebook.py:69-81`, `outrigger/notebook.py:98-117`, `outrigger/notebook.py:301-318`, `outrigger/notebook.py:228-276`, `outrigger/notebook.py:218-225`, `outrigger/notebook.py:337-353`, `outrigger/ws.py:310-402` |
 | Notebook tools (`notebook_read`/`notebook_edit`) | model → host files | `doc_for_tool`: only the note whose `//` command is running in this chat; subagents denied (the mark is the deny signal). Authorization decided at command start (via `get()`); **decided behavior** (owner, 19 Nov 2026): mid-turn grant narrowing does NOT abort the in-flight command — its tool calls continue until `end_command`; client writes are revoked immediately. `tool_edit` refreshes from disk before the version compare (no clobber); unreadable → JSON refusal. | host `.md` write | `outrigger/notebook_tools.py:21-41`, `outrigger/notebook_tools.py:72-137`, `outrigger/notebook.py:451-511` |
 | Subagent gate | delegated child → clients/notes | `subagent_start` marks the child session; the mark IS the `allow_subagents` (default **false**) deny signal — `mark_subagent` never evicts and never refuses (overflow retained, loud WARNING at `MAX_TRACKED_SUBAGENTS`=1024, a warning threshold not a bound). Marked sessions get no clients (`for_session`, dispatch) and no notebook tools. `allow_subagents=true` permits client calls but notebook tools still deny subagents. | client call / note edit denial | `outrigger/registry.py:147-185`, `outrigger/registry.py:215-239`, `outrigger/__init__.py:84-95`, `outrigger/dispatch.py:46-47`, `outrigger/dispatch.py:71-73`, `outrigger/notebook_tools.py:36-37` |
@@ -127,8 +127,9 @@ sequenceDiagram
   W->>R: _register / add (ws.py:208-247)
   W-->>C: welcome (limits, platform)
   H->>D: outrigger_call{tool,args} (worker thread)
-  D->>R: pick client and count_call (dispatch.py:122-138)
-  D->>D: validate_args (dispatch.py:130-133)
+  D->>R: pick client (dispatch.py:122-124)
+  D->>D: decl lookup, validate_args (dispatch.py:125-133)
+  D->>R: count_call per-turn cap (dispatch.py:135-138)
   D->>V: review if policy not auto and review=smart (dispatch.py:141-147)
   V-->>D: verdict (advisory, deny with block rejects)
   D->>C: call{args, review} via client.send (dispatch.py:190-197)
@@ -368,3 +369,17 @@ continues. Residual limits are stated honestly (from
   the installed gateway's CORS middleware default-denies unlisted browser
   Origins. Do not set `cors_origins: '*'` on a keyless deployment.
   (auth-trust-boundary.md §3; ledger rejected CSWSH finding.)
+- **Capture-write errors escape the audit trail (claims-pass finding; hardening
+  follow-up, owner decision).** `_save_capture` (`outrigger/audit.py:95-134`)
+  does mkdir/open/write/prune without a guard: an OSError (disk full,
+  permissions) propagates through `_format_ok`/`_run` and skips that call's
+  `audit.record`. The call fails loud (the ws handler's exception guard logs
+  ERROR), but the outcome is not in audit.jsonl. A guarded capture write (returning an
+  image_error field so the call completes audited) is a functional change —
+  logged for the next remediation pass, not done in this refactor.
+- **Non-dict token-store JSON raises (claims-pass finding; hardening follow-up).**
+  `tokens._load` (`outrigger/tokens.py:44-62`) handles unreadable/dict-shaped
+  corrupt JSON as an empty store, but a non-dict top-level JSON value raises
+  AttributeError before the shape check. Still fail closed (the handshake
+  errors out; no token verifies) and loud; routing it through the empty-store
+  path is a one-line hardening for the next remediation pass.
