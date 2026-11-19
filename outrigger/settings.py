@@ -1,4 +1,12 @@
-"""Plugin settings, filled from plugins.entries.outrigger.settings at register()."""
+"""Plugin settings, filled from plugins.entries.outrigger.settings at register().
+
+Trust boundary: operator config -> trust switches. Bool-typed settings are
+coerced via _as_bool (quoted "false"/0/1 normalized); an unrecognized value logs
+loud and uses the declared default (fail closed for refusal switches such as
+allow_keyless_local / allow_remote / owner_key_remote). Deliberately does NOT:
+authenticate or enforce — it only resolves the switches the security modules read.
+"""
+# Audit: see AUDIT.md#security-sensitive-units (trust settings / bool coercion)
 from __future__ import annotations
 
 import logging

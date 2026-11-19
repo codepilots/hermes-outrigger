@@ -11,7 +11,15 @@ approve on a truncated prefix.
 
 Only documented plugin APIs are used: ctx.llm.complete_structured and
 ctx.register_auxiliary_task (the task inherits Hermes's "approval" model).
+
+Trust boundary: model -> gateway -> client. The verdict is ADVISORY metadata that
+travels with the call; a deny is final gateway-side only when review_deny="block"
+(opt-in, default "ask"). Over-budget / unserializable args force escalate before
+any model call (fail closed); reviewer failure or unclear verdict escalates.
+Deliberately does NOT: enforce the client's confirm/deny policy (the client UI
+does) or make the default deny binding.
 """
+# Audit: see AUDIT.md#security-sensitive-units (approval / review)
 from __future__ import annotations
 
 import json

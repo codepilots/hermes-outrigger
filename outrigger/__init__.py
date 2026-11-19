@@ -1,4 +1,12 @@
-"""hermes-outrigger: let thin clients attach to a session and offer tools."""
+"""hermes-outrigger: let thin clients attach to a session and offer tools.
+
+Plugin entry point: registers the outrigger_call / outrigger_tools and
+notebook_read / notebook_edit tools, the lifecycle/subagent hooks, the WS route
+and the Outrigger platform. Trust boundary: wires the security units together;
+admission (auth.py), validation (protocol.py), review (reviewer.py) and the
+subagent gate (registry.py) live in their own modules. Deliberately does NOT:
+implement those controls here — it only registers handlers and hooks.
+"""
 from __future__ import annotations
 
 import logging

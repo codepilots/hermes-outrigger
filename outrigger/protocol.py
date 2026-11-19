@@ -1,4 +1,15 @@
-"""Wire messages and validation for the outrigger control channel."""
+"""Wire messages and validation for the outrigger control channel.
+
+Trust boundary: untrusted client tool declarations / args -> gateway. Validates
+tool names (\\Z-anchored regex), policies, and JSON Schemas (small, shallow, no
+patternProperties, local-only refs — the gateway never fetches a client-chosen
+URI, an SSRF backstop), and validates model args against the declared schema.
+jsonschema ImportError fails closed (loud) for declarations; args fall back to a
+minimal validator that still refuses non-local refs. Deliberately does NOT:
+authenticate peers (auth.py) or run tools; it only accepts/rejects declarations
+and args. `pattern` is dropped gateway-side (ReDoS) and left to the client.
+"""
+# Audit: see AUDIT.md#security-sensitive-units (input validation)
 from __future__ import annotations
 
 import json

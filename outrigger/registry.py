@@ -1,4 +1,14 @@
-"""Connected clients, session bindings and pending-call bookkeeping."""
+"""Connected clients, session bindings and pending-call bookkeeping.
+
+Trust boundary: delegated child agents (subagents) -> clients / notes. The
+subagent gate (mark_subagent / unmark_subagent / is_subagent, banner below) is a
+security surface: the mark IS the allow_subagents deny signal — marked sessions
+get no clients (for_session) and no notebook tools. Marks are never evicted and
+never refused (overflow retained, loud WARNING); a missed stop leaks memory, not
+authority. Deliberately does NOT: authenticate peers (auth.py) or decide tool
+policy; it tracks membership, caps and per-turn state.
+"""
+# Audit: see AUDIT.md#security-sensitive-units (subagent gate / membership caps)
 from __future__ import annotations
 
 import asyncio
@@ -128,7 +138,7 @@ class Registry:
             except Exception:  # loop gone, socket already closed
                 pass
 
-    # ---- subagents
+    # ---- subagents (security gate: the mark IS the allow_subagents deny signal)
     def mark_subagent(self, session_id: str) -> None:
         with self._lock:
             if session_id in self.subagents:

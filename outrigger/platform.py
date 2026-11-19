@@ -8,7 +8,14 @@ Discord message does. Replies come back through send/edit_message as
 
 Only the public adapter surface is used: gateway.platforms.base, .event,
 gateway.config (public plugin API).
+
+Trust boundary: token user -> Hermes toolsets / slash-command gating. The
+admin-scope mitigation (toolsets_for_user / access_extra, F-10) stays in this
+module because it reads the live chat registry (CHATS) — see the banner below.
+Deliberately does NOT: authenticate the socket (auth.py / ws.py) or sandbox the
+agent turn; it narrows toolsets and access lists, the gateway pipeline enforces.
 """
+# Audit: see AUDIT.md#security-sensitive-units (platform admin-scope authz / inbound)
 from __future__ import annotations
 
 import asyncio
@@ -97,6 +104,11 @@ def user_of(client: Client) -> tuple[str, str | None]:
         return p["user_id"], (p.get("user_name") or None)
     return str(settings.get("platform_owner_id") or "owner"), (settings.get("platform_owner_name") or None)
 
+
+# ---------------------------------------------------------------- admin-scope authz (F-10)
+# Kept in platform.py (NOT moved to a separate authz module): toolsets_for_user
+# reads the live chat registry CHATS below, so it is entangled with platform chat
+# state. Moving it would force a platform import back-reference for no cohesion gain.
 
 def access_extra() -> dict:
     """Hermes's own per-platform access lists (gateway allowlist and slash-command gating),

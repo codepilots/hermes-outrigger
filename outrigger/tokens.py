@@ -8,7 +8,14 @@ $HERMES_HOME/plugin-data/outrigger/tokens.json (mode 0600). The gateway re-reads
 file when it changes, so pairing and revoking need no restart.
 
 Token format: otr_<id>_<secret>  (id: 8 hex chars; secret: 32 url-safe chars)
+
+Trust boundary: owner CLI -> token store -> gateway admission. Only SHA-256
+hashes are stored (0600); verify is constant-time (dummy compare on unknown id);
+revoke sets a timestamp and live connections close on the keepalive check.
+Deliberately does NOT: store secrets, log tokens, or decide remote admission
+(auth.py reads allow_remote); it only mints/verifies/revokes scoped identities.
 """
+# Audit: see AUDIT.md#security-sensitive-units (credentials / token pairing)
 from __future__ import annotations
 
 import hashlib

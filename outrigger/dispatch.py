@@ -3,7 +3,15 @@
 Tool handlers run on a Hermes worker thread, not the gateway event loop, so these
 are plain sync functions that block on a concurrent Future; the websocket side
 resolves it from the gateway loop.
+
+Trust boundary: model -> gateway -> client device -> model. Selects the client
+(subagent gate via registry), validates args, runs the advisory reviewer, relays
+the call, and bounds/sanitizes the untrusted result before the model sees it
+(F-07). Every outcome is audited (audit.record); capture images go to
+audit._save_capture. Deliberately does NOT: execute the tool (the client does),
+or make the reviewer's deny final unless review_deny="block" (default advisory).
 """
+# Audit: see AUDIT.md#security-sensitive-units (dispatch relay / result bounding)
 from __future__ import annotations
 
 import concurrent.futures
@@ -12,6 +20,8 @@ import logging
 import time
 
 from . import audit, platform, reviewer, settings
+# Re-export: tests call dispatch._save_capture; audit.py owns the capture writer.
+from .audit import _save_capture
 from .protocol import sanitize_text, validate_args
 from .registry import REGISTRY, Client, ClientGone
 
@@ -192,51 +202,9 @@ def _run(client: Client, sid: str, decl, tool: str, call_args: dict, timeout: fl
     return "cancelled" if code == "outrigger_cancelled" else "error", _err(code, message)
 
 
-CAPTURE_TYPES = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}
-MAX_CAPTURE_BYTES = 8 * 1024 * 1024
-KEEP_CAPTURES = 20
-
-
-def _save_capture(image) -> dict:
-    """A client tool returned an image ({mime, data: base64}). A plugin tool's result is text
-    to the model, so the image is saved as a file and Hermes is told to open it with its
-    vision_analyze tool (which shows it natively on vision-capable models, else describes it)."""
-    import base64
-    import os
-    import secrets
-    import time
-    from pathlib import Path
-    mime = str(image.get("mime", "")).lower() if isinstance(image, dict) else ""
-    ext = CAPTURE_TYPES.get(mime)
-    if not ext or not isinstance(image.get("data"), str):
-        return {"image_error": "unsupported image (png, jpeg or webp, base64)"}
-    try:
-        raw = base64.b64decode(image["data"], validate=True)
-    except Exception:
-        return {"image_error": "invalid base64"}
-    if len(raw) > MAX_CAPTURE_BYTES:
-        return {"image_error": f"image larger than {MAX_CAPTURE_BYTES // (1024 * 1024)} MB"}
-    # The declared type must match the bytes (they're handed to Hermes's vision tool).
-    magic = {".png": raw[:8] == b"\x89PNG\r\n\x1a\n", ".jpg": raw[:3] == b"\xff\xd8\xff",
-             ".webp": raw[:4] == b"RIFF" and raw[8:12] == b"WEBP"}
-    if not magic.get(ext, False):
-        return {"image_error": f"data is not a {mime} image"}
-    home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
-    folder = home / "plugin-data" / "outrigger" / "captures"
-    folder.mkdir(parents=True, exist_ok=True)
-    path = folder / f"{time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(3)}{ext}"
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "wb") as f:
-        f.write(raw)
-    for old in sorted(folder.iterdir(), key=lambda p: p.stat().st_mtime)[:-KEEP_CAPTURES]:
-        old.unlink(missing_ok=True)
-    return {"image_path": str(path), "bytes": len(raw),
-            "hint": "Open it with vision_analyze (image_url = image_path) to look at it."}
-
-
 def _format_ok(content, decl) -> str:
     if isinstance(content, dict) and "image" in content:
-        content = {**{k: v for k, v in content.items() if k != "image"}, **_save_capture(content["image"])}
+        content = {**{k: v for k, v in content.items() if k != "image"}, **audit._save_capture(content["image"])}
     if not isinstance(content, str):
         content = json.dumps(content, default=str)
     limit = min(decl.max_result_chars or settings.get("max_result_chars"),

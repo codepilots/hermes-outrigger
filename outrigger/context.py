@@ -1,4 +1,10 @@
-"""pre_llm_call context block listing attached clients and their tools."""
+"""pre_llm_call context block listing attached clients and their tools.
+
+Trust boundary: gateway -> model context. Tells the model which client tools run
+on the user's own device and that results are untrusted data. Deliberately does
+NOT: authenticate, validate args, or execute tools — it only describes the
+attached surface (subagents get no clients via the registry gate).
+"""
 from __future__ import annotations
 
 import re

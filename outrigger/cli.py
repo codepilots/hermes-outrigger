@@ -1,4 +1,9 @@
-"""`hermes outrigger …`: pair, list and revoke client tokens (ctx.register_cli_command)."""
+"""`hermes outrigger …`: pair, list and revoke client tokens (ctx.register_cli_command).
+
+Trust boundary: owner CLI -> token store. Mints (shown once), lists (never shows
+secrets) and revokes tokens via tokens.py. Deliberately does NOT: accept remote
+input or authenticate the gateway — it is the owner's local pairing surface.
+"""
 from __future__ import annotations
 
 import time

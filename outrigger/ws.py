@@ -1,12 +1,23 @@
-"""WebSocket control channel: GET /v1/outrigger/ws."""
+"""WebSocket control channel: GET /v1/outrigger/ws.
+
+Responsibility: connection lifecycle (upgrade, hello/registration, keepalive,
+detach), message routing, per-user rate limiting, chat and notebook doc ops, and
+ingress result/error bounding. Trust boundary: untrusted WS peer -> gateway
+control surface. Admission is decided in auth.py (re-exported here so ws.<name>
+stays resolvable and identical); this module only routes already-authenticated
+peers and never logs keys or headers.
+
+Deliberately does NOT: decide admission (auth.py), execute client tools (the
+owner's device does, the plugin relays), or write note files (notebook.py). It
+bounds untrusted result/error fields at ingress (F-07); dispatch sanitizes and
+caps again before the model sees them.
+"""
+# Audit: see AUDIT.md#security-sensitive-units (ws routing / rate limit / ingress)
 from __future__ import annotations
 
 import asyncio
-import hmac
-import ipaddress
 import json
 import logging
-import os
 import time
 
 from aiohttp import WSMsgType, web
@@ -14,6 +25,9 @@ from aiohttp import WSMsgType, web
 from . import events, notebook, platform, settings, tokens
 from .protocol import PROTOCOL_VERSION, SUPPORTED_PROTOCOLS, ProtocolError, int_field, one_line, parse_tools, str_field
 from .registry import REGISTRY, Client
+# Re-export the auth surface so ws.<name> stays resolvable and identical (auth.py owns it).
+from .auth import (_expected_key, _presented_key, _is_loopback, PROXY_HEADERS, _is_local,
+                   _peer, OWNER, authenticate, authorize, _limited)
 
 log = logging.getLogger("hermes.plugins.outrigger")
 
@@ -25,123 +39,7 @@ MAX_MSG = 4 * 1024 * 1024
 MAX_CONCURRENCY = 8
 
 
-def _expected_key(request: web.Request | None = None) -> str:
-    """The credential this route expects: the plugin's auth_token, else the gateway's
-    OWN resolved key (the live api_server adapter reads extra['key'], profile-scoped
-    secrets and env at startup and is exposed as app['api_server_adapter']), else raw
-    env API_SERVER_KEY. Consulting the adapter's resolved key keeps a config-keyed
-    gateway from falling into keyless local-owner trust (F-10). Never logs the key."""
-    token = settings.get("auth_token")
-    if token:
-        return token
-    app = getattr(request, "app", None)
-    get = getattr(app, "get", None)
-    adapter = get("api_server_adapter") if callable(get) else None
-    key = getattr(adapter, "_api_key", "") or ""
-    if key:
-        return str(key)
-    return os.environ.get("API_SERVER_KEY", "")
-
-
-def _presented_key(request: web.Request) -> str:
-    auth = request.headers.get("Authorization", "")
-    if auth.lower().startswith("bearer "):
-        return auth[7:].strip()
-    for proto in request.headers.get("Sec-WebSocket-Protocol", "").split(","):
-        proto = proto.strip()
-        if proto.startswith("bearer."):
-            return proto[len("bearer."):]
-    return ""
-
-
-def _is_loopback(request: web.Request) -> bool:
-    try:
-        return ipaddress.ip_address(request.remote or "").is_loopback
-    except ValueError:
-        return False
-
-
-# A reverse proxy or tunnel (cloudflared, nginx, Caddy…) on this machine connects from
-# loopback; these headers say the request really came from elsewhere.
-PROXY_HEADERS = ("CF-Connecting-IP", "CF-Ray", "CF-Visitor", "True-Client-IP", "X-Forwarded-For",
-                 "X-Forwarded-Host", "X-Forwarded-Proto", "X-Real-IP", "Forwarded", "Via")
-
-
-def _is_local(request: web.Request) -> bool:
-    """A client on this machine: loopback and not relayed by a proxy."""
-    return _is_loopback(request) and not any(h in request.headers for h in PROXY_HEADERS)
-
-
-def _peer(request: web.Request) -> str:
-    """For logs only (never for decisions): the client address a proxy reports, else the socket's."""
-    for h in ("CF-Connecting-IP", "True-Client-IP", "X-Real-IP"):
-        if request.headers.get(h):
-            return one_line(request.headers[h], 64)
-    xff = request.headers.get("X-Forwarded-For", "")
-    if xff:
-        return one_line(xff.split(",")[0], 64)
-    return str(request.remote or "?")
-
-
-OWNER = {"kind": "owner"}
-
-
-def authenticate(request: web.Request) -> tuple[web.Response | None, dict | None]:
-    """(refusal, principal). The principal is the owner (API key or, with no key set,
-    loopback) or a paired client token's user. Never logs headers or keys."""
-    presented = _presented_key(request)
-    local = _is_local(request)
-    rec = tokens.verify(presented) if presented.startswith("otr_") else None
-    if rec is not None:
-        if not local and not settings.get("allow_remote"):
-            log.warning("outrigger: refused remote client %s (allow_remote is off)", _peer(request))
-            return web.json_response({"error": "forbidden"}, status=403), None
-        return None, {"kind": "token", **rec}
-    if presented.startswith("otr_"):
-        log.warning("outrigger: bad or revoked token from %s", _peer(request))
-        return web.json_response({"error": "unauthorized"}, status=401), None
-    refusal = authorize(request)
-    return refusal, (None if refusal is not None else OWNER)
-
-
-def authorize(request: web.Request) -> web.Response | None:
-    """None if allowed as the owner. Never logs headers or the key."""
-    key = _expected_key(request)
-    local = _is_local(request)
-    if not key:
-        # No credential configured: only a process on this machine (not via a proxy) may attach.
-        if not local:
-            log.warning("outrigger: refused remote client %s (no key configured)", _peer(request))
-            return web.json_response({"error": "forbidden"}, status=403)
-        if not settings.get("allow_keyless_local"):
-            log.warning("outrigger: refused %s: no key configured and allow_keyless_local is off; "
-                        "configure auth_token or API_SERVER_KEY, or pair a token", _peer(request))
-            return web.json_response({"error": "forbidden"}, status=403)
-        # Fail loud (F-10): this admission rests on a locality heuristic (loopback + no
-        # proxy headers) that a header-less same-host relay can defeat; it is not a
-        # verified local peer. See docs/security-review/auth-trust-boundary.md.
-        log.warning("outrigger: admitted %s as OWNER with no credential (keyless local trust); "
-                    "locality is a heuristic a header-less relay can defeat — configure "
-                    "auth_token/API_SERVER_KEY or set allow_keyless_local=false", _peer(request))
-        return None
-    if not local and not (settings.get("allow_remote") and settings.get("owner_key_remote")):
-        # The API key unlocks the whole gateway; by default it never works from outside.
-        log.warning("outrigger: refused the API key from remote client %s (owner_key_remote is off; use a paired token)",
-                    _peer(request))
-        return web.json_response({"error": "forbidden"}, status=403)
-    # surrogateescape: a header with undecodable bytes must fail the comparison, not raise.
-    if not hmac.compare_digest(_presented_key(request).encode("utf-8", "surrogateescape"),
-                               key.encode("utf-8", "surrogateescape")):
-        log.warning("outrigger: bad or missing key from %s", _peer(request))
-        return web.json_response({"error": "unauthorized"}, status=401)
-    return None
-
-
-def _limited(client: Client) -> bool:
-    """A paired non-admin user (rate-limited, narrower toolsets)."""
-    p = client.principal
-    return p.get("kind") == "token" and not p.get("admin")
-
+# ---------------------------------------------------------------- rate limiting
 
 _RATE: dict[str, list[float]] = {}
 
@@ -183,6 +81,8 @@ async def _err(ws, code: str, message: str, close: bool = False) -> None:
     if close and not ws.closed:
         await ws.close()
 
+
+# ---------------------------------------------------------------- connection lifecycle
 
 async def ws_handler(request: web.Request) -> web.StreamResponse:
     denied, principal = authenticate(request)
@@ -267,6 +167,8 @@ async def ws_handler(request: web.Request) -> web.StreamResponse:
     return ws
 
 
+# ---------------------------------------------------------------- routing / ingress decode
+
 def _decode(raw) -> dict | None:
     if raw.type != WSMsgType.TEXT:
         return None
@@ -333,6 +235,8 @@ def _welcome(client: Client, session_id) -> dict:
 _CHAT_ID_RE = __import__("re").compile(r"^[A-Za-z0-9_.:-]{1,128}\Z")
 
 
+# ---------------------------------------------------------------- chat (Outrigger platform)
+
 async def _handle_chat(client: Client, t: str, m: dict, ws) -> None:
     """Outrigger platform (protocol 2): chat messages go to Hermes's messaging pipeline."""
     if "chat" not in client.capabilities:
@@ -372,6 +276,8 @@ async def _handle_chat(client: Client, t: str, m: dict, ws) -> None:
     await platform.inbound(client, local, text, mid)
     await ws.send_json({"type": "chat.accepted", "chat_id": local, "client_msg_id": mid})
 
+
+# ---------------------------------------------------------------- doc ops (notebook)
 
 async def _handle_doc(client: Client, t: str, m: dict, ws) -> None:
     """Notebook mode (docs/notebook.md): notes on the Hermes host, `//` commands."""
@@ -470,6 +376,8 @@ def _parse_redaction(raw) -> dict | None:
     return {"enabled": True, "categories": [one_line(c, 20) for c in cats[:20] if isinstance(c, str)]}
 
 
+# ---------------------------------------------------------------- message routing
+
 async def _handle(client: Client, m: dict, ws) -> None:
     t = m.get("type")
     if not isinstance(t, str) or len(t) > 40:
@@ -489,6 +397,7 @@ async def _handle(client: Client, m: dict, ws) -> None:
     elif t == "context.update":
         client.summary = one_line(m.get("summary", ""), 300)
     elif t == "result":
+        # ---- ingress: bound the untrusted result/error before the model (F-07)
         call_id = m.get("call_id")
         if not isinstance(call_id, str):
             raise ProtocolError("bad_result", "call_id required")
