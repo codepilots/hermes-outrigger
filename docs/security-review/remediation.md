@@ -34,7 +34,7 @@ lines), commits the fix, then the ledger entry, then dispatches the next.
 | F-07 | Unbounded 4 MB error relay (0bf92726) | Low | dispatch.py, ws.py | **fixed (48c0983)** |
 | F-08 | Subagent marker eviction fail-open (9c9370fa) | Low | registry.py | **fixed (5e81db0)** |
 | F-09 | Audit silent loss + identity + tamper (f37f9e4d) + artifact permissions (2eaf3124) + malformed-request unrecorded (6af3ae03) | Inconclusive→fix + Info | audit.py, dispatch.py, notebook.py | **fixed (42bf71b)** |
-| F-10 | Auth locality fail-open (e75c7051) + credential-source mismatch (76d74ef9) + admin-scope mismatch (ed211e05) | Inconclusive→mitigate+residual | ws.py, platform.py, settings.py, docs | pending |
+| F-10 | Auth locality fail-open (e75c7051) + credential-source mismatch (76d74ef9) + admin-scope mismatch (ed211e05) | Inconclusive→mitigate+residual | ws.py, platform.py, settings.py, docs | **mitigated (4668957) — partial** |
 | F-11 | Regex `$` trailing newline (c0efd191) | Informational | protocol.py, ws.py | pending |
 
 Rejected by the review (no action): CSWSH/Origin (4a1ae1ca — gateway CORS
@@ -287,3 +287,42 @@ and duplicate merges.
 - **RED evidence:** new file first run 14 failed / 2 passed (the 2 are
   preservation guards); fail-loud/identity/0600/malformed tests failed for the
   right reason.
+
+### F-10 — Auth locality / key-source / admin-scope — MITIGATED, honest PARTIAL (4668957)
+- **Acceptance class:** architectural / trust-boundary — mitigate + document
+  residual, NOT "fully fixed". Child returned status=partial (correct).
+- **Mitigations (tested):** `_expected_key(request)` reads the gateway's live
+  resolved key via `app['api_server_adapter']._api_key` (precedence plugin
+  auth_token > adapter key > env) — a config-keyed gateway never falls into
+  keyless local-owner; `authorize` gains `allow_keyless_local` (default true;
+  false refuses every credential-less owner attach) + loud WARNING on every
+  keyless-local-owner admission; `toolsets_for_user`/`access_extra` scope admin
+  by live connections (live non-admin narrows even with an idle admin token;
+  mixed fail closed; registry-race fail closed; per-user fallback only with no
+  live connection).
+- **Residual doc:** `docs/security-review/auth-trust-boundary.md` — per-finding
+  proves/does-not-prove, operator deployment controls, fail-loud inventory,
+  residual summary table. Honest about the locality heuristic's fundamental
+  limit and the per-token-admin API gap.
+- **Residuals (OPEN, documented):** locality e75c7051 fundamental (header-less
+  relay indistinguishable over TCP; needs Unix socket/SO_PEERCRED or trusted-
+  proxy allowlist — out of scope); credential-source conditional (gateways
+  without the app-key hook fall back to plugin+env view); admin-scope API gap
+  (true per-token admin needs a gateway API change — mixed-connection narrowing,
+  connectionless per-user fallback, first-doc.command sync race, mint-time
+  warning unfenced). Browser boundary stays with gateway CORS.
+- **Accepted deviations:** admin scope uses live-connection state (CHATS), not
+  true per-token threading (SessionSource carries user_id only; adapter wrapper
+  fenced); allow_keyless_local default true preserves local dev; plugin.yaml
+  config_schema not updated (fenced) — setting works via loader, declaration is
+  a docs follow-up; tokens.py untouched.
+- **Parent verification (independent):** full diff read + residual doc read
+  (honest, no overclaim); suite re-run **306 passed, 1 skipped** (281 + 25 new,
+  zero regressions); parent probe `cache/scratch/verify_auth_parent.py` —
+  **13 assertions pass**: adapter-key precedence closes keyless route on a keyed
+  gateway, allow_keyless_local gate + loud warnings, live non-admin narrows
+  toolsets/admin list, no-live admin fallback; static greps clean (3 hits were
+  benign config reads/docstring).
+- **RED evidence:** new file first run 12 failed / 13 passed (the 13 are
+  preservation guards); keyless/wrong-key admission, missing-warning and
+  admin-scope tests failed for the right reason.
