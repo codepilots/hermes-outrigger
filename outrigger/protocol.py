@@ -13,7 +13,7 @@ log = logging.getLogger("hermes.plugins.outrigger")
 PROTOCOL_VERSION = 2
 SUPPORTED_PROTOCOLS = {1, 2}  # 2 adds the Outrigger platform's chat.* messages
 POLICIES = ("auto", "confirm", "deny_when_unattended")
-_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,63}$")
+_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,63}\Z")
 _CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 

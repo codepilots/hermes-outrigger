@@ -329,7 +329,7 @@ def _welcome(client: Client, session_id) -> dict:
     return msg
 
 
-_CHAT_ID_RE = __import__("re").compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+_CHAT_ID_RE = __import__("re").compile(r"^[A-Za-z0-9_.:-]{1,128}\Z")
 
 
 async def _handle_chat(client: Client, t: str, m: dict, ws) -> None:
