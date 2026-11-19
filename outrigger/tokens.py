@@ -33,6 +33,8 @@ def path() -> Path:
 
 
 def _load() -> dict:
+    """The token store, re-read when the file's mtime changes. Any unreadable or malformed
+    file — including non-dict top-level JSON — yields the empty store (fail closed)."""
     p = path()
     try:
         key = (str(p), p.stat().st_mtime_ns)
@@ -42,6 +44,8 @@ def _load() -> dict:
     if key != _cache["key"]:
         try:
             data = json.loads(p.read_text())
+            if not isinstance(data, dict):
+                raise ValueError("bad token file")
             if not isinstance(data.get("tokens"), dict):
                 raise ValueError("bad token file")
         except (OSError, ValueError):
