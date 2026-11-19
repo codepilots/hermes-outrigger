@@ -28,7 +28,7 @@ lines), commits the fix, then the ledger entry, then dispatches the next.
 | F-01 | SSRF via schema `$ref` (8a3f0a04) + schema-check fail-open (231342bf) | Medium + Low | protocol.py | **fixed (f3bd438)** |
 | F-02 | Reviewer padded-args truncation (27db6f36) + `</untrusted>` delimiter escape (5a654c56) | Medium + Low | reviewer.py, plugin.yaml | **fixed (93a58ea)** |
 | F-03 | Notebook unbounded cache + on-loop `doc.list` DoS (f3441f81) | Medium | notebook.py, ws.py | **fixed (aa95320)** |
-| F-04 | Notebook watcher silent exception (245216c2) + `tool_edit` no disk refresh (b26e85aa) | Low + Low | notebook.py | pending |
+| F-04 | Notebook watcher silent exception (245216c2) + `tool_edit` no disk refresh (b26e85aa) | Low + Low | notebook.py | **fixed (ec569df)** |
 | F-05 | Notebook stale root grants (4ea8d7ce) + doc-identity aliasing (539075fd) | Low + Low | notebook.py, ws.py | pending |
 | F-06 | Notebook shared-root indirect injection labeling (39fe8161) | Low | notebook.py, dispatch.py | pending |
 | F-07 | Unbounded 4 MB error relay (0bf92726) | Low | dispatch.py, ws.py | pending |
@@ -121,3 +121,33 @@ and duplicate merges.
 - **RED evidence:** new file first run 8 failed / 1 passed (the 1 is the
   normal-use guard); cap/eviction/rate-limit/off-loop/walk-bound tests failed
   for the right reason.
+
+### F-04 — Notebook watcher fail-loud + tool_edit disk refresh — FIXED (ec569df)
+- **Delegation:** one subagent, TDD (WATCH_INTERVAL shrunk to 0.01 for real ticks).
+- **Fix:** `_watch` guards expire_locks / per-doc `_check_disk` / broadcast each
+  tick (broad Exception incl UnicodeDecodeError), loud + continue; `broadcast`
+  guards per client (closed loop → loud skip, healthy clients still receive);
+  `expire_locks` per-doc guard leaves a bad doc locked (fail closed);
+  `_lock_timeout_s` coerces null/bad config to default, loud; `_watch_done`
+  supervisor logs death at ERROR and restarts without doc.open; `tool_edit`
+  calls `_check_disk` before the version compare, OSError/ValueError →
+  NotebookError('unreadable') JSON refusal (never raises/clobbers).
+- **Accepted deviations:** per-client guarding inside broadcast (a tick-only
+  guard would lose a one-shot disk-change broadcast to healthy clients);
+  per-doc guard inside expire_locks; `_check_disk`/`_read` bodies unchanged
+  (guarding at call sites keeps update() byte-identical).
+- **Residuals (for the audit pass, out of F-04 scope):** `tool_read` still serves
+  cached text (clobbering now prevented by tool_edit's refresh); deleted-note
+  semantics unchanged (`_check_disk` returns False on stat OSError, so a deleted
+  note is recreated from cache — tool_edit never raises there).
+- **Parent verification (independent):** full diff read; suite re-run
+  **225 passed, 1 skipped** (212 + 13 new, zero regressions); parent probe
+  `cache/scratch/verify_watcher_parent.py` — **11 assertions pass**: watcher
+  alive after non-UTF-8 write, bad timeouts coerced, closed-loop broadcast
+  non-fatal, supervisor restart, tool_edit refuses stale/unreadable + preserves
+  external save, normal edit works; static greps clean. (One probe assertion
+  initially failed on a wrong `edits` format — probe bug, corrected; apply_edits
+  is line-based from_line/to_line/text.)
+- **RED evidence:** new file first run 11 failed / 2 passed (the 2 are normal-
+  behavior guards); watcher-death, bad-timeout, closed-loop and tool_edit-clobber
+  tests failed for the right reason.
