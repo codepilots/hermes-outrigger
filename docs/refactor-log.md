@@ -185,3 +185,51 @@ improved deltas.
 - Inline hub pointers already present in every security module (step 2/3).
 - Remaining: commit, push, PR, both CI checks green, then branch protection
   requiring "test" + "docs-audit" (main currently unprotected).
+- Commit: `e83d1ac`. Pushed; **PR #3** open against main
+  (https://github.com/codepilots/hermes-outrigger/pull/3). CI: **test pass
+  (28s), docs-audit pass (30s)**; head matches local. Branch protection PUT +
+  read-back: contexts ["test","docs-audit"], strict true, enforce_admins true.
+- Steps 5 + 6 complete.
+
+### Step 7 — whole-project evaluation + skill improvement
+- Post-refactor measurements: core **3,798 lines / 16 modules**, doc+comment
+  density **28.0%** (≈7% pre-remediation → 14.4% post-remediation → 28% now;
+  the growth is honest documentation, ast-proven zero logic change).
+- Auditability verdict: an auditor can (1) read AUDIT.md as the mental model
+  (110 mechanically-enforced anchors, 6 verified diagrams, failure contracts,
+  honest residuals), (2) jump straight to any security concern via named units
+  (auth.py, notebook_tools.py, audit.py+captures, tokens.py, protocol.py,
+  reviewer.py, registry.py gate section, settings.py, platform.py admin-scope
+  section) with inline hub pointers, (3) trust the docs because CI breaks on
+  drift and binds merges incl. the owner, (4) see decided behaviors and open
+  residuals explicitly. Remaining limits: notebook.py/platform.py still mixed
+  (deliberate — live-state entanglement, bannered); notebook edits + platform
+  chat outside audit.jsonl; two hardening follow-ups pending owner decision;
+  locality heuristic fundamental residual.
+- Skill deltas from THIS campaign (the parallel sidebar campaign already
+  landed the monkeypatch/PEP-562/ast-proof/frozen-evidence/JS lessons):
+  claims-pass→hardening-follow-up pipeline; README stale-status class;
+  sequence-diagram ORDER checking (bundled nodes hide ordering errors);
+  negative gate self-test; new-prose re-passes the strict gate.
+
+### Step 8 — rerun of the improved skill (verification)
+- Skill bumped to **v1.1.0** with the five campaign deltas (claims-pass →
+  hardening-follow-up pipeline; README stale-status class; sequence-diagram
+  ORDER checking / split bundled nodes; negative gate self-test; new prose
+  re-passes the strict gate). The parallel sidebar campaign's lessons
+  (monkeypatch retargeting, PEP 562, ast proofs, frozen-evidence exemption,
+  JS/acorn adaptation, job-name protection contexts) were already landed.
+- **Rerun against the final tree — all gates green:**
+  - Behavior-preservation chain complete: main → dec4c17 (moves ast-proven) →
+    9050391 (docstrings-only ast-proven) → 5aa496f (docstrings/comments-only
+    ast-proven) → e83d1ac (enforcement files only; `git diff 5aa496f..HEAD --
+    outrigger/` empty).
+  - Suite **393 passed, 1 skipped**, two identical runs.
+  - Strict gate **PASS** (110 anchors, 12 pointers, 0 overclaims); negative
+    self-test **FAIL** on the broken-anchor copy (gate is not a rubber stamp).
+  - **256 semantic anchor assertions pass**; **6/6 diagrams render**.
+  - New checks satisfied: README status/test-count/install refreshed; diagram
+    (a) in real call order; two hardening follow-ups documented as residuals
+    with owner decision pending; all new prose re-passed the strict gate.
+- Campaign complete. PR #3 carries the full refactor; main is protected by
+  test + docs-audit (strict, enforce_admins).
