@@ -199,8 +199,21 @@ def open_doc(root: str, rel: str, client, allowed: set | None = None) -> Doc:
     full = resolve(root, rel)
     if not full.is_file():
         raise NotebookError("not_found", f"no note {rel}")
-    doc_id = f"{root}:{Path(rel).as_posix()}"
+    # F-05: key DOCS by the resolved file identity, not the client's spelling, so
+    # in-root symlinks and overlapping/nested root names share one Doc (one mutex,
+    # lock and version). The first root in config order containing the real path
+    # gives a stable canonical doc_id, unchanged for ordinary disjoint roots.
+    rs = roots()
+    canon = next(n for n, b in rs.items() if b in full.parents)
+    crel = full.relative_to(rs[canon]).as_posix()
+    doc_id = f"{canon}:{crel}"
     doc = DOCS.get(doc_id)
+    if doc is None:
+        # A retained handle for the same real file wins even if the canonical root
+        # name changed (settings reload/reorder): one file, one Doc, one lock.
+        doc = next((d for d in DOCS.values() if d.full == full), None)
+        if doc is not None:
+            doc_id = doc.doc_id
     if doc is None or client not in doc.clients:
         held = sum(1 for d in DOCS.values() if client in d.clients)
         if held >= MAX_DOCS_PER_CLIENT:
@@ -214,7 +227,7 @@ def open_doc(root: str, rel: str, client, allowed: set | None = None) -> Doc:
             log.warning("outrigger notebook: refused open of %s: %d notes retained (global cap %d)",
                         doc_id, len(DOCS), MAX_OPEN_DOCS)
             raise NotebookError("too_many_docs", f"too many open notes on this gateway (max {MAX_OPEN_DOCS}); try again shortly")
-        doc = Doc(doc_id=doc_id, root=root, path=Path(rel).as_posix(), full=full)
+        doc = Doc(doc_id=doc_id, root=canon, path=crel, full=full)
         _read(doc)
         DOCS[doc_id] = doc
     else:
@@ -251,6 +264,14 @@ def get(doc_id: str, client) -> Doc:
     doc = DOCS.get(doc_id)
     if doc is None or client not in doc.clients:
         raise NotebookError("not_open", "open the note first")
+    # F-05: re-check the grant on every operation, not just at open time: narrowing
+    # notebook_roots_for must revoke already-open documents. Match the note's real
+    # location against the granted roots' directories so alias root names for the
+    # same tree still count (the owner's allowed set is every root).
+    rs = roots()
+    bases = [rs[r] for r in allowed_roots(client) if r in rs]
+    if not any(b in doc.full.parents for b in bases):
+        raise NotebookError("not_allowed", "this note's root is no longer granted (notebook_roots_for)")
     return doc
 
 
