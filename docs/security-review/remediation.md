@@ -29,7 +29,7 @@ lines), commits the fix, then the ledger entry, then dispatches the next.
 | F-02 | Reviewer padded-args truncation (27db6f36) + `</untrusted>` delimiter escape (5a654c56) | Medium + Low | reviewer.py, plugin.yaml | **fixed (93a58ea)** |
 | F-03 | Notebook unbounded cache + on-loop `doc.list` DoS (f3441f81) | Medium | notebook.py, ws.py | **fixed (aa95320)** |
 | F-04 | Notebook watcher silent exception (245216c2) + `tool_edit` no disk refresh (b26e85aa) | Low + Low | notebook.py | **fixed (ec569df)** |
-| F-05 | Notebook stale root grants (4ea8d7ce) + doc-identity aliasing (539075fd) | Low + Low | notebook.py, ws.py | pending |
+| F-05 | Notebook stale root grants (4ea8d7ce) + doc-identity aliasing (539075fd) | Low + Low | notebook.py | **fixed (7c4608c)** |
 | F-06 | Notebook shared-root indirect injection labeling (39fe8161) | Low | notebook.py, dispatch.py | pending |
 | F-07 | Unbounded 4 MB error relay (0bf92726) | Low | dispatch.py, ws.py | pending |
 | F-08 | Subagent marker eviction fail-open (9c9370fa) | Low | registry.py, __init__.py | pending |
@@ -151,3 +151,34 @@ and duplicate merges.
 - **RED evidence:** new file first run 11 failed / 2 passed (the 2 are normal-
   behavior guards); watcher-death, bad-timeout, closed-loop and tool_edit-clobber
   tests failed for the right reason.
+
+### F-05 — Notebook stale grants + doc-identity aliasing — FIXED (7c4608c)
+- **Delegation:** one subagent, TDD. ws.py untouched (all three doc ops authorize
+  via get()).
+- **Fix:** `get()` re-checks the note's resolved location against the granted
+  roots' directories every call (`not_allowed` when no longer granted) —
+  directory-aware so an alias root name for the same tree still counts; owner
+  and still-granted roots unaffected; full revocation preserved. `open_doc`
+  keys DOCS by resolved file identity (canonical config-order root +
+  realpath-relative path) with a retained-handle fallback for settings
+  reload/reorder, so in-root symlinks and overlapping/nested root names share
+  one Doc/mutex/lock/version; canonical doc_id byte-identical for disjoint roots.
+- **Accepted deviations:** directory-aware grant recheck (not literal name
+  membership) to preserve alias-root grants; roots() NOT coalesced (would drop
+  operator-granted names from allowed_roots); retained-handle fallback added
+  (closes an identity-split edge found adversarially).
+- **Residuals (documented, for the audit pass):** hardlink aliases not coalesced
+  (distinct realpaths, same inode; inode keying unstable because atomic _write
+  os.replace changes the inode); case/Unicode variants on case-insensitive hosts
+  (not protocol-triggerable on the pinned Linux/ext4); a narrowed user still
+  receives doc.changed broadcasts on a held-open doc until close/disconnect
+  (broadcast is F-04 territory) — write authorization is fully revoked.
+- **Parent verification (independent):** full diff read; suite re-run
+  **234 passed, 1 skipped** (225 + 9 new, zero regressions); parent probe
+  `cache/scratch/verify_grants_parent.py` — **10 assertions pass**: narrowing
+  revokes, still-granted/owner preserved, full revocation blocks, symlink +
+  overlapping-root aliases coalesce to one lock, distinct files separate,
+  normal update works, F-03 caps intact; static greps clean.
+- **RED evidence:** new file first run 7 failed / 2 passed (the 2 are
+  preservation guards); grant-recheck and alias-coalescing tests failed for the
+  right reason.
