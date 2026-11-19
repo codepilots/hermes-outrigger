@@ -100,11 +100,14 @@ def user_of(client: Client) -> tuple[str, str | None]:
 
 def access_extra() -> dict:
     """Hermes's own per-platform access lists (gateway allowlist and slash-command gating),
-    kept in step with the token store: the owner and admin tokens get every command; other
-    paired users get user_allowed_commands (plus Hermes's /help and /whoami floor)."""
+    kept in step with the token store: the owner and admin users get every command; other
+    paired users get user_allowed_commands (plus Hermes's /help and /whoami floor).
+    F-10: admin is scoped like toolsets_for_user — a user with a live non-admin
+    connection is not admin here, even if another of their tokens is admin."""
     from . import tokens
     owner = str(settings.get("platform_owner_id") or "owner")
-    users, admins = tokens.active_users()
+    users, _ = tokens.active_users()
+    admins = {u for u in users if toolsets_for_user(u) is None}
     return {"allow_from": sorted({owner} | users), "allow_admin_from": sorted({owner} | admins),
             "user_allowed_commands": [str(c) for c in settings.get("user_allowed_commands")]}
 
@@ -113,13 +116,29 @@ def toolsets_for_user(user_id: str) -> list[str] | None:
     from . import tokens
     if user_id == str(settings.get("platform_owner_id") or "owner"):
         return None
-    _, admins = tokens.active_users()
-    if user_id in admins:
-        return None
     ts = settings.get("user_toolsets")
     ts = [str(t) for t in ts] if isinstance(ts, list) else ["web", "outrigger", "no_mcp"]
     # Hermes treats an empty override as "none given" (the full default), so say "nothing".
-    return ts or ["no_mcp"]
+    restricted = ts or ["no_mcp"]
+    # F-10 (admin scope): the gateway hands us only the user id, never the token, so
+    # scope by the clients currently serving this user's chats: a live non-admin
+    # connection constrains the user's chats even when another of their tokens is
+    # admin (fail closed when admin and non-admin connections coexist). With no live
+    # connection, fall back to the token store's per-user admin flag (residual:
+    # cron/outbox turns; see docs/security-review/auth-trust-boundary.md).
+    try:
+        live = [c for c in tuple(CHATS.values())
+                if not c.closed and c.principal.get("kind") == "token"
+                and c.principal.get("user_id") == user_id]
+    except RuntimeError:  # CHATS mutated from another loop mid-scan: fail closed
+        log.warning("outrigger: chat registry changed mid-scan; restricting toolsets for %s", user_id)
+        return restricted
+    if any(not c.principal.get("admin") for c in live):
+        return restricted
+    _, admins = tokens.active_users()
+    if user_id in admins:
+        return None
+    return restricted
 
 
 def attach(client: Client, local: str) -> str:

@@ -25,8 +25,22 @@ MAX_MSG = 4 * 1024 * 1024
 MAX_CONCURRENCY = 8
 
 
-def _expected_key() -> str:
-    return settings.get("auth_token") or os.environ.get("API_SERVER_KEY", "")
+def _expected_key(request: web.Request | None = None) -> str:
+    """The credential this route expects: the plugin's auth_token, else the gateway's
+    OWN resolved key (the live api_server adapter reads extra['key'], profile-scoped
+    secrets and env at startup and is exposed as app['api_server_adapter']), else raw
+    env API_SERVER_KEY. Consulting the adapter's resolved key keeps a config-keyed
+    gateway from falling into keyless local-owner trust (F-10). Never logs the key."""
+    token = settings.get("auth_token")
+    if token:
+        return token
+    app = getattr(request, "app", None)
+    get = getattr(app, "get", None)
+    adapter = get("api_server_adapter") if callable(get) else None
+    key = getattr(adapter, "_api_key", "") or ""
+    if key:
+        return str(key)
+    return os.environ.get("API_SERVER_KEY", "")
 
 
 def _presented_key(request: web.Request) -> str:
@@ -92,13 +106,23 @@ def authenticate(request: web.Request) -> tuple[web.Response | None, dict | None
 
 def authorize(request: web.Request) -> web.Response | None:
     """None if allowed as the owner. Never logs headers or the key."""
-    key = _expected_key()
+    key = _expected_key(request)
     local = _is_local(request)
     if not key:
         # No credential configured: only a process on this machine (not via a proxy) may attach.
         if not local:
             log.warning("outrigger: refused remote client %s (no key configured)", _peer(request))
             return web.json_response({"error": "forbidden"}, status=403)
+        if not settings.get("allow_keyless_local"):
+            log.warning("outrigger: refused %s: no key configured and allow_keyless_local is off; "
+                        "configure auth_token or API_SERVER_KEY, or pair a token", _peer(request))
+            return web.json_response({"error": "forbidden"}, status=403)
+        # Fail loud (F-10): this admission rests on a locality heuristic (loopback + no
+        # proxy headers) that a header-less same-host relay can defeat; it is not a
+        # verified local peer. See docs/security-review/auth-trust-boundary.md.
+        log.warning("outrigger: admitted %s as OWNER with no credential (keyless local trust); "
+                    "locality is a heuristic a header-less relay can defeat — configure "
+                    "auth_token/API_SERVER_KEY or set allow_keyless_local=false", _peer(request))
         return None
     if not local and not (settings.get("allow_remote") and settings.get("owner_key_remote")):
         # The API key unlocks the whole gateway; by default it never works from outside.

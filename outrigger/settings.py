@@ -8,6 +8,11 @@ DEFAULTS = {
     # from 127.0.0.1, so its requests count as remote.
     "allow_remote": False,  # accept remote clients at all (paired tokens)
     "owner_key_remote": False,  # also accept the API key from remote clients (prefer admin tokens)
+    # F-10: admit a credential-less loopback peer as OWNER when no key exists anywhere
+    # (plugin auth_token, the gateway's resolved key, env API_SERVER_KEY). Locality is a
+    # heuristic a header-less same-host relay can defeat; off refuses every keyless
+    # owner attach. See docs/security-review/auth-trust-boundary.md.
+    "allow_keyless_local": True,
     # Toolsets for paired non-admin users' chats (Hermes's toolsets_for_source); the owner
     # and admin tokens keep the platform default. "no_mcp" keeps MCP servers out.
     "user_toolsets": ["web", "outrigger", "no_mcp"],
