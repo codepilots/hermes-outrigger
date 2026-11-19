@@ -49,6 +49,10 @@ def _expected_key(request: web.Request | None = None) -> str:
 
 
 def _presented_key(request: web.Request) -> str:
+    """Actor: untrusted WS peer. Input: Authorization: Bearer header, else a
+    bearer.<token> Sec-WebSocket-Protocol entry. Control: extraction only —
+    verification happens in authenticate. Sink: the presented credential
+    string ("" when absent). Never logs the value."""
     auth = request.headers.get("Authorization", "")
     if auth.lower().startswith("bearer "):
         return auth[7:].strip()
@@ -60,6 +64,9 @@ def _presented_key(request: web.Request) -> str:
 
 
 def _is_loopback(request: web.Request) -> bool:
+    """Socket peer address parses as loopback; absent/unparseable -> False
+    (fail closed). One half of the _is_local heuristic — not verified peer
+    identity (F-10 residual)."""
     try:
         return ipaddress.ip_address(request.remote or "").is_loopback
     except ValueError:
@@ -73,12 +80,15 @@ PROXY_HEADERS = ("CF-Connecting-IP", "CF-Ray", "CF-Visitor", "True-Client-IP", "
 
 
 def _is_local(request: web.Request) -> bool:
-    """A client on this machine: loopback and not relayed by a proxy."""
+    """A client on this machine: loopback AND no PROXY_HEADERS present. A
+    HEURISTIC, not verified peer identity — a header-less same-host relay
+    (ssh -L, socat, bare proxy_pass) looks local (F-10 residual)."""
     return _is_loopback(request) and not any(h in request.headers for h in PROXY_HEADERS)
 
 
 def _peer(request: web.Request) -> str:
-    """For logs only (never for decisions): the client address a proxy reports, else the socket's."""
+    """For logs only (never for decisions): the client address a proxy reports, else the socket's.
+    Proxy-reported values are peer-controlled; one_line(..., 64) bounds them for log splicing."""
     for h in ("CF-Connecting-IP", "True-Client-IP", "X-Real-IP"):
         if request.headers.get(h):
             return one_line(request.headers[h], 64)
@@ -92,8 +102,12 @@ OWNER = {"kind": "owner"}
 
 
 def authenticate(request: web.Request) -> tuple[web.Response | None, dict | None]:
-    """(refusal, principal). The principal is the owner (API key or, with no key set,
-    loopback) or a paired client token's user. Never logs headers or keys."""
+    """(refusal, principal) gating the session bind. Actor: untrusted WS peer at
+    upgrade. Input: presented key/token + locality. Control: otr_ tokens ->
+    tokens.verify (constant-time), remote needs allow_remote (default false);
+    otherwise authorize() decides owner admission. Invariant: only a verified
+    token user or the owner may attach. Failures: WARNING + 401 (bad/revoked
+    token), WARNING + 403 (remote token, allow_remote off). Never logs headers or keys."""
     presented = _presented_key(request)
     local = _is_local(request)
     rec = tokens.verify(presented) if presented.startswith("otr_") else None
@@ -110,7 +124,14 @@ def authenticate(request: web.Request) -> tuple[web.Response | None, dict | None
 
 
 def authorize(request: web.Request) -> web.Response | None:
-    """None if allowed as the owner. Never logs headers or the key."""
+    """None if allowed as the owner. Actor: untrusted peer; input: expected key
+    (_expected_key) + locality. Control/sink: no key anywhere -> local-only AND
+    allow_keyless_local (default true, opt-out), admitted with a loud WARNING
+    (locality heuristic, F-10); keyed -> constant-time compare, remote needs
+    allow_remote AND owner_key_remote (both default false). Invariant: the API
+    key unlocks the whole gateway, so by default it never works remotely or
+    keyless. Failures: WARNING + 403 (remote / keyless-off), WARNING + 401
+    (bad/missing key). Never logs headers or the key."""
     key = _expected_key(request)
     local = _is_local(request)
     if not key:
@@ -143,6 +164,8 @@ def authorize(request: web.Request) -> web.Response | None:
 
 
 def _limited(client: Client) -> bool:
-    """A paired non-admin user (rate-limited, narrower toolsets)."""
+    """A paired non-admin user (rate-limited, narrower toolsets). Reads the
+    principal assigned at registration (authenticate); owner and admin tokens
+    are exempt from _rate_check."""
     p = client.principal
     return p.get("kind") == "token" and not p.get("admin")

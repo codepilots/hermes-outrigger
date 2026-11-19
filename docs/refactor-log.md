@@ -101,3 +101,14 @@ improved deltas.
   mermaid blocks re-rendered from the updated AUDIT.md. Overclaim grep clean.
   Fence check: docs/security-review/, CHANGELOG, plugin.yaml, .github/,
   requirements-dev.txt untouched.
+- Commit: `dec4c17` (moves + docstrings/pointers + AUDIT.md remap + cohesion
+  tests + 3 retargeted monkeypatch lines + this log).
+
+### Step 3 — document to standard (dispatched)
+- Delegation `deleg_0bee4a5d`: docstrings/comments ONLY, zero code changes,
+  proven mechanically (ast.dump identity with docstrings stripped, HEAD vs
+  working tree, every modified file). Function-level actor/input/control/sink +
+  invariant + fail-loud contracts across all security functions; concise audit
+  prose, no padding, existing honest content preserved (decided F-05 window,
+  F-10 heuristic caveats). AUDIT.md anchors remapped in the same tree
+  (docstring lines shift anchors — the freshness mechanism as designed).

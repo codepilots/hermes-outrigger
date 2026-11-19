@@ -20,6 +20,9 @@ from . import notebook
 
 def doc_for_tool(session_id: str | None) -> notebook.Doc:
     """The note a notebook_* call may touch: the one whose // command is running in this chat.
+    Actor: the model's notebook_read/notebook_edit call. Control: the subagent
+    mark denies (the mark IS the allow_subagents deny signal); only a locked,
+    running command's note. Sink: that one Doc (host .md).
 
     Authorization is decided at // command start (doc.command goes through get(),
     which re-checks root grants). Decided behavior (owner, 19 Nov 2026): narrowing a
@@ -67,6 +70,11 @@ def _json(obj) -> str:
 
 
 def tool_read(args: dict, session_id: str | None = None, **_) -> str:
+    """Actor: model (Hermes turn). Input: from_line/to_line. Control:
+    doc_for_tool (subagent denial + running // command only). Sink: read-only
+    JSON of the cached note text, labeled untrusted: True (collaborator text is
+    data, never instructions). Serves the cache, not a disk refresh (F-04
+    residual); line range clamped to the note; NotebookError -> JSON refusal."""
     try:
         doc = doc_for_tool(session_id)
     except notebook.NotebookError as e:
@@ -100,6 +108,13 @@ def apply_edits(text: str, edits: list) -> str:
 
 
 def tool_edit(args: dict, session_id: str | None = None, **_) -> str:
+    """Actor: model. Input: version + line edits. Control: doc_for_tool, then
+    under doc.mutex a disk refresh BEFORE the version compare (an external save
+    is never clobbered; refresh failure -> JSON refusal unreadable), stale
+    version -> stale_version, size cap notebook_max_bytes. Sink: atomic _write
+    + broadcast. Invariant: edits apply only to the version the model read; all
+    failures return JSON refusals (bad_edit/stale_version/too_large/unreadable)
+    and the note is preserved."""
     try:
         doc = doc_for_tool(session_id)
         with doc.mutex:

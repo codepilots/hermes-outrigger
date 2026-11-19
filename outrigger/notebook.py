@@ -68,7 +68,9 @@ def roots() -> dict[str, Path]:
 
 def allowed_roots(client) -> set[str]:
     """Roots this client's user may use: the owner gets all; a paired token's user gets the
-    roots listed for them in notebook_roots_for ({"ann": ["shared"]}, or "*" for all)."""
+    roots listed for them in notebook_roots_for ({"ann": ["shared"]}, or "*" for all;
+    default {} = none). Invariant: a token user never sees an ungranted root; get()
+    re-checks this on every operation, so narrowing revokes held-open docs (F-05)."""
     available = set(roots())
     p = getattr(client, "principal", {"kind": "owner"})
     if p.get("kind") == "owner":
@@ -94,7 +96,11 @@ def enabled() -> bool:
 
 
 def resolve(root: str, rel: str) -> Path:
-    """The real path of a note inside a root, or NotebookError. No escapes, no hidden parts."""
+    """The real path of a note inside a root, or NotebookError. Actor: client
+    doc.open path. Control: relative-only, no '..'/'.'/hidden parts, .md only,
+    then resolve() and a containment re-check (symlink escapes refused). Sink:
+    a Path confined to a configured root — the path-confinement invariant for
+    the host-file sink. Refusals raise no_root/bad_path; nothing is written here."""
     base = roots().get(root)
     if base is None:
         raise NotebookError("no_root", f"unknown notebook root {root!r}")
@@ -112,6 +118,11 @@ def resolve(root: str, rel: str) -> Path:
 
 
 def listing(root: str | None = None, query: str = "", limit: int = 50, allowed: set | None = None) -> list[dict]:
+    """Actor: client doc.list (run off-loop by ws). Input: root/query/limit +
+    granted roots. Control: walk only granted roots, skip hidden entries, bound
+    the walk at LIST_WALK_LIMIT=5000 files/dirs (cap hit -> WARNING, listing may
+    be incomplete), results capped at LIST_LIMIT=200. Sink: read-only metadata;
+    no note content is opened."""
     q = (query or "").lower().strip()
     found = []
     visited = 0
@@ -191,7 +202,10 @@ def _read(doc: Doc) -> None:
 
 
 def _write(doc: Doc, text: str) -> None:
-    """Atomic write keeping the file mode; updates the doc's version and stat."""
+    """Atomic write keeping the file mode; updates the doc's version and stat.
+    Sink: host .md file via temp file + os.replace (no partial note visible).
+    Callers (update / undo / start_command / tool_edit) hold doc.mutex and have
+    passed lock/version checks; this function itself checks no grants."""
     tmp = doc.full.with_name(f".{doc.full.name}.outrigger-{secrets.token_hex(3)}")
     mode = doc.full.stat().st_mode & 0o777 if doc.full.exists() else 0o644
     with open(tmp, "w", encoding="utf-8", newline="") as f:
@@ -203,7 +217,8 @@ def _write(doc: Doc, text: str) -> None:
 
 def _evict_idle_docs(need: int) -> None:
     """LRU-evict up to `need` retained docs that no client holds open and that are not
-    locked (a locked note may still have a running // command). Held notes are never touched."""
+    locked (a locked note may still have a running // command). Held notes are never touched.
+    Each eviction is logged loud (WARNING) so open-doc cap pressure is observable."""
     idle = sorted((d for d in DOCS.values() if not d.clients and not d.lock), key=lambda d: d.last_used)
     for d in idle[:need]:
         DOCS.pop(d.doc_id, None)
@@ -211,6 +226,12 @@ def _evict_idle_docs(need: int) -> None:
 
 
 def open_doc(root: str, rel: str, client, allowed: set | None = None) -> Doc:
+    """Actor: client doc.open. Input: root + relative path + granted roots.
+    Control: root grant, resolve() confinement, per-client cap
+    MAX_DOCS_PER_CLIENT=16 and global MAX_OPEN_DOCS=64 (LRU-evict only
+    clientless+unlocked docs, else refuse loud). Sink: a retained Doc keyed by
+    resolved file identity — one mutex/lock/version per real file (F-05).
+    Refusals: WARNING + too_many_docs, or no_root/not_found/too_large."""
     if allowed is not None and root not in allowed:
         raise NotebookError("no_root", f"unknown notebook root {root!r}")
     full = resolve(root, rel)
@@ -278,6 +299,11 @@ def drop_client(client) -> None:
 
 
 def get(doc_id: str, client) -> Doc:
+    """Actor: client op on a held doc (update/undo/command). Control: the client
+    must hold the doc AND its resolved location must still sit under a granted
+    root's directory — re-checked EVERY operation, so narrowing
+    notebook_roots_for revokes already-open docs (F-05). Sink: the Doc for the
+    write path. Refusals: not_open / not_allowed (doc.error frame to the client)."""
     doc = DOCS.get(doc_id)
     if doc is None or client not in doc.clients:
         raise NotebookError("not_open", "open the note first")
@@ -293,7 +319,10 @@ def get(doc_id: str, client) -> Doc:
 
 
 def _check_disk(doc: Doc) -> bool:
-    """Re-read if the file changed outside; True when the text changed."""
+    """Re-read if the file changed outside; True when the text changed. stat
+    OSError -> False (treated as unchanged; a deleted note is recreated from
+    cache on edit — F-04 residual). A too_large/undecodable re-read raises to
+    the caller (tool_edit turns it into a JSON refusal)."""
     try:
         st = _stat(doc.full)
     except OSError:
@@ -306,6 +335,11 @@ def _check_disk(doc: Doc) -> bool:
 
 
 def update(doc: Doc, base_version: str, text: str) -> str:
+    """Actor: client doc.update. Control under doc.mutex: locked -> refused
+    (Hermes is working), disk refresh, base_version must match (else conflict),
+    size cap notebook_max_bytes. Sink: atomic _write to the host note.
+    Invariant: no clobber of a concurrent edit or a running // command.
+    Refusals raise locked/conflict/too_large (conflict carries current text)."""
     with doc.mutex:
         if doc.lock:
             raise NotebookError("locked", "Hermes is working on this note")
@@ -372,7 +406,9 @@ def _lock_info(doc: Doc) -> dict | None:
 
 def broadcast(doc: Doc, msg: dict, *, exclude=None) -> None:
     """Send to every client with the note open; safe from the loop or a worker thread.
-    One unreachable client (e.g. a closed loop) is logged loud and skipped, never fatal."""
+    One unreachable client (e.g. a closed loop) is logged loud and skipped, never fatal.
+    Does NOT re-check root grants: a narrowed user still receives doc.changed on a
+    held-open doc until close/disconnect (F-05 residual)."""
     for c in list(doc.clients):
         if c is exclude or c.closed:
             continue
@@ -415,7 +451,13 @@ def note_chat_id(doc: Doc) -> str:
 def start_command(doc: Doc, client, base_version: str, line: int | None, instruction: str,
                   selection: tuple[int, int] | None = None) -> dict:
     """Remove the // line (inline command) or keep the text (a command on a selection),
-    snapshot, lock. The caller then starts the Hermes turn."""
+    snapshot, lock. The caller then starts the Hermes turn. Actor: client
+    doc.command (after get()'s grant recheck). Control under doc.mutex: not
+    already locked, disk refresh, base_version match, selection bounds. Sink:
+    snapshot + atomic write + doc.lock (the note is locked for the user while
+    Hermes works). Refusals: bad_command/locked/conflict/bad_selection.
+    Authorization is decided here at start (F-05 decided window: mid-turn grant
+    narrowing does not abort the in-flight command)."""
     instruction = (instruction or "").strip()
     if not instruction:
         raise NotebookError("bad_command", "empty instruction")
@@ -455,6 +497,10 @@ def command_message(doc: Doc, line: int | None, instruction: str, selection: tup
 
 
 def end_command(doc: Doc, notice: str = "") -> None:
+    """Unlock a note when its // command's turn ends (or the lock expires).
+    Idempotent: no lock -> no-op. Clears NOTE_CHATS (doc_for_tool then refuses
+    no_command) and broadcasts unlock + fresh content. Sink: state change only;
+    the note file is untouched."""
     with doc.mutex:
         if not doc.lock:
             return
@@ -492,6 +538,10 @@ def _lock_timeout_s() -> int:
 
 
 def expire_locks() -> None:
+    """Watcher tick: unlock notes whose // command outran notebook_lock_timeout_s
+    (default 600s; bad config -> WARNING + default). Fail closed per doc: if
+    end_command raises, WARNING and that note STAYS locked; other docs still
+    expire (one bad doc must not starve the rest)."""
     limit = _lock_timeout_s()
     for doc in list(DOCS.values()):
         if doc.lock and time.time() - doc.lock["started"] > limit:
@@ -516,6 +566,10 @@ def _session_chat() -> str | None:
 # ---------------------------------------------------------------- watcher
 
 async def _watch() -> None:
+    """Watcher loop (every WATCH_INTERVAL=2s): expire stale locks, re-check each
+    open doc's disk state, broadcast outside changes. Fail loud per guard: a bad
+    tick/doc/broadcast is WARNING-logged and skipped; the loop continues (one
+    bad write must not kill watching for everyone)."""
     while True:
         await asyncio.sleep(WATCH_INTERVAL)
         try:
@@ -540,7 +594,9 @@ async def _watch() -> None:
 
 
 def _watch_done(task: asyncio.Task) -> None:
-    """Supervise the watcher: log a death loud and restart it without waiting for a doc.open."""
+    """Supervise the watcher: log a death loud (ERROR) and restart it without waiting
+    for a doc.open. Cancelled -> WARNING, no restart; restart with no running loop
+    -> WARNING (the next doc.open calls ensure_watcher again)."""
     global _watch_task
     if task.cancelled():
         log.warning("outrigger notebook: watcher task cancelled")
@@ -557,6 +613,8 @@ def _watch_done(task: asyncio.Task) -> None:
 
 
 def ensure_watcher() -> None:
+    """Start the watcher task if absent/done (idempotent). Needs a running event
+    loop; raises RuntimeError otherwise (_watch_done logs that loud)."""
     global _watch_task
     if _watch_task is None or _watch_task.done():
         _watch_task = asyncio.get_running_loop().create_task(_watch())

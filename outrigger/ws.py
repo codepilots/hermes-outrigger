@@ -46,7 +46,10 @@ _RATE: dict[str, list[float]] = {}
 
 def _rate_check(client: Client) -> None:
     """Per-user limit on messages that start Hermes turns (chat and // commands)
-    and on notebook doc.list / doc.open (owner/admin exempt)."""
+    and on notebook doc.list / doc.open (owner/admin exempt).
+    user_messages_per_min (default 20; <=0 disables); sliding 60s window keyed
+    by user_id. Over limit -> ProtocolError rate_limited (error frame, the
+    connection stays)."""
     if not _limited(client):
         return
     per_min = int(settings.get("user_messages_per_min") or 0)
@@ -85,6 +88,12 @@ async def _err(ws, code: str, message: str, close: bool = False) -> None:
 # ---------------------------------------------------------------- connection lifecycle
 
 async def ws_handler(request: web.Request) -> web.StreamResponse:
+    """The route handler: authenticate BEFORE upgrade (auth.py), then hello
+    within HELLO_TIMEOUT=10s (else hello_timeout + close), register, welcome,
+    route messages. Keepalive runs alongside; detach always removes the client
+    from registry/platform/notebook. Unexpected handler errors are logged loud
+    (ERROR) and answered with internal_error — the connection survives a bad
+    message."""
     denied, principal = authenticate(request)
     if denied is not None:
         return denied
@@ -95,6 +104,9 @@ async def ws_handler(request: web.Request) -> web.StreamResponse:
     last_seen = time.monotonic()
 
     async def keepalive():
+        """Every PING_INTERVAL=20s: revoked token -> INFO + close 4401 (the ~20s
+        revocation latency, by design); DEAD_AFTER=50s without traffic -> drop;
+        else ping. A failed ping send ends the loop quietly (peer gone)."""
         while not ws.closed:
             await asyncio.sleep(PING_INTERVAL)
             if principal.get("kind") == "token" and not tokens.is_active(principal["id"]):
@@ -170,6 +182,11 @@ async def ws_handler(request: web.Request) -> web.StreamResponse:
 # ---------------------------------------------------------------- routing / ingress decode
 
 def _decode(raw) -> dict | None:
+    """Ingress decode: TEXT frames only, strict JSON (NaN/Infinity refused), a
+    whole-message UTF-8 round-trip rejects lone surrogates once for every field;
+    deep nesting (RecursionError) refused. Invalid -> None (bad_message error
+    frame, connection kept). Frame size bounded by MAX_MSG=4 MiB at the
+    WebSocket layer."""
     if raw.type != WSMsgType.TEXT:
         return None
     try:
@@ -189,6 +206,12 @@ def _no_constant(name):
 
 
 def _register(msg: dict, ws, loop, principal: dict | None = None) -> Client:
+    """Actor: authenticated peer's hello. Input: protocol/client/tools/
+    capabilities. Control: supported protocol, name required (one_line 64),
+    concurrency 1..8 (bools refused), tools via parse_tools; token clients'
+    session_id forced None (API session binding is owner-only). Sink: Client in
+    REGISTRY (caps checked by add, RuntimeError on overflow); a replaced duplicate's socket is closed.
+    Refusals: ProtocolError/RuntimeError -> error frame + close."""
     principal = principal or OWNER
     if msg.get("protocol") not in SUPPORTED_PROTOCOLS:
         raise ProtocolError("bad_protocol", f"supported protocols: {sorted(SUPPORTED_PROTOCOLS)}")
@@ -238,7 +261,12 @@ _CHAT_ID_RE = __import__("re").compile(r"^[A-Za-z0-9_.:-]{1,128}\Z")
 # ---------------------------------------------------------------- chat (Outrigger platform)
 
 async def _handle_chat(client: Client, t: str, m: dict, ws) -> None:
-    """Outrigger platform (protocol 2): chat messages go to Hermes's messaging pipeline."""
+    """Outrigger platform (protocol 2): chat messages go to Hermes's messaging pipeline.
+    Actor: client with the 'chat' capability. Control: \\Z-anchored chat_id regex,
+    platform available, owns() for chat.action/chat.stop (cross-chat denial),
+    text non-empty + max_chat_chars cap, _rate_check for non-admin. Sink:
+    platform.inbound (a Hermes turn) / prompt answer. Refusals: ProtocolError ->
+    error frame, connection kept."""
     if "chat" not in client.capabilities:
         raise ProtocolError("no_chat_capability", "declare the 'chat' capability in hello")
     local = m.get("chat_id")
@@ -280,7 +308,13 @@ async def _handle_chat(client: Client, t: str, m: dict, ws) -> None:
 # ---------------------------------------------------------------- doc ops (notebook)
 
 async def _handle_doc(client: Client, t: str, m: dict, ws) -> None:
-    """Notebook mode (docs/notebook.md): notes on the Hermes host, `//` commands."""
+    """Notebook mode (docs/notebook.md): notes on the Hermes host, `//` commands.
+    Actor: client with the 'notebook' capability + granted roots. Control:
+    capability + notebook_roots configured + allowed_roots non-empty; every
+    mutating op goes through get()'s grant recheck; list/open/command rate-
+    limited for non-admin; the doc.list walk runs off-loop (F-03). Sink: host
+    .md writes via notebook. NotebookError -> doc.error frame (conflict carries
+    current text/version); OSError -> io_error frame; connection kept."""
     if "notebook" not in client.capabilities:
         raise ProtocolError("no_notebook_capability", "declare the 'notebook' capability in hello")
     if not notebook.enabled():
@@ -379,6 +413,12 @@ def _parse_redaction(raw) -> dict | None:
 # ---------------------------------------------------------------- message routing
 
 async def _handle(client: Client, m: dict, ws) -> None:
+    """Route one decoded message from an authenticated client. Control: type
+    must be a short string; bind is owner-only (token clients -> not_allowed);
+    result ingress bounds the untrusted error field (F-07) before resolving the
+    pending future; doc.*/chat.* delegate to their handlers. Unknown type ->
+    ProtocolError; ws_handler's safety net logs unexpected errors loud and keeps
+    the connection."""
     t = m.get("type")
     if not isinstance(t, str) or len(t) > 40:
         raise ProtocolError("bad_message", "type must be a short string")
@@ -406,6 +446,8 @@ async def _handle(client: Client, m: dict, ws) -> None:
         # F-07: the error field is client-controlled detail, not a gateway code.
         # Coerce non-strings and bound the length at ingress (defense in depth;
         # dispatch._run sanitizes and caps again before the model sees it).
+        # Invariant: no client-controlled string reaches the model unbounded; ok
+        # content is bounded later in dispatch._format_ok (untrusted label + cap).
         if error is not None and not isinstance(error, str):
             error = json.dumps(error, default=str)
         if isinstance(error, str):

@@ -91,7 +91,12 @@ class Registry:
 
     # ---- membership
     def add(self, client: Client) -> Client | None:
-        """Register; returns a replaced duplicate (same name + session) if any."""
+        """Register; returns a replaced duplicate (same name + session + principal) if any.
+        Actor: authenticated hello (_register). Control: per-token cap
+        max_clients_per_token (default 4), all tokens share MAX_CLIENTS=16, the
+        owner has MAX_CLIENTS of their own — paired tokens never crowd out the
+        owner. Sink: REGISTRY membership. Refusal: RuntimeError (too many
+        connections) -> ws closes with too_many_clients."""
         with self._lock:
             replaced = None
             for c in list(self.clients.values()):
@@ -140,6 +145,12 @@ class Registry:
 
     # ---- subagents (security gate: the mark IS the allow_subagents deny signal)
     def mark_subagent(self, session_id: str) -> None:
+        """Actor: subagent_start hook (trusted gateway). The mark IS the
+        allow_subagents (default false) deny signal: marked sessions get no
+        clients (for_session) and no notebook tools. Never evicts, never refuses
+        — overflow marks retained with a loud WARNING at
+        MAX_TRACKED_SUBAGENTS=1024 (a warning threshold, not a bound); a missed
+        subagent_stop leaks memory, never authority."""
         with self._lock:
             if session_id in self.subagents:
                 return
@@ -162,10 +173,14 @@ class Registry:
                     MAX_TRACKED_SUBAGENTS, len(self.subagents), session_id)
 
     def unmark_subagent(self, session_id: str) -> None:
+        """subagent_stop hook: reclaim a mark. The only removal path — there is no
+        liveness oracle, so marks are never evicted automatically."""
         with self._lock:
             self.subagents.discard(session_id)
 
     def is_subagent(self, session_id: str | None) -> bool:
+        """The deny predicate: True for a marked session id (None/empty -> False).
+        Read by dispatch, notebook_tools and the rotate guard."""
         with self._lock:
             return bool(session_id) and session_id in self.subagents
 
@@ -186,7 +201,9 @@ class Registry:
                 client.sessions.add(session_id)
 
     def rotate(self, old_session_id: str, new_session_id: str) -> None:
-        """A rotating compression moved the conversation to a new session id."""
+        """A rotating compression moved the conversation to a new session id.
+        Guard: a new id already marked subagent is never adopted — the mark IS the
+        deny signal; a child must not inherit the parent's clients."""
         with self._lock:
             if new_session_id in self.subagents:
                 return
@@ -203,7 +220,8 @@ class Registry:
         which survives rotating compression; a client bound to it follows the
         conversation to the new id. A delegated subagent carries its parent's
         conversation_id too, so subagent sessions (seen via subagent_start) get no
-        clients unless allow_subagent, and never move the binding.
+        clients unless allow_subagent (mirrors settings.allow_subagents, default
+        false), and never move the binding.
         """
         with self._lock:
             sub = bool(session_id) and session_id in self.subagents
@@ -260,6 +278,10 @@ class Registry:
             return list(self.actions.get(session_id, []))
 
     def count_call(self, session_id: str, client: Client) -> int:
+        """Per-turn call counter keyed (session, client): dispatch refuses with
+        outrigger_call_limit once it exceeds max_calls_per_turn (default 20).
+        Reset by end_turn; the count is the per-turn cap's input, not a bound
+        itself."""
         with self._lock:
             key = (session_id, client.id)
             self.call_counts[key] = self.call_counts.get(key, 0) + 1

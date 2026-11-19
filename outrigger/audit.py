@@ -30,12 +30,22 @@ _write_failures = 0
 
 
 def _path() -> Path:
+    """audit.jsonl under $HERMES_HOME/plugin-data/outrigger (owner-only by
+    creation mode 0600; grows unbounded — no rotation, F-09 residual)."""
     home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
     return home / "plugin-data" / "outrigger" / "audit.jsonl"
 
 
 def record(*, session_id, client, tool, args, policy, outcome, duration_s, review=None,
            principal=None) -> None:
+    """Actor: dispatch (every tool-call outcome, incl. pre-client rejections).
+    Input: session/client/tool/args/policy/outcome + client.principal identity.
+    Control: args stored as SHA-256 only unless audit_args=true (opt-in, default
+    false); no secrets/keys. Sink: append to audit.jsonl, created 0600
+    (creation-only: a pre-existing file keeps its mode). Fail-loud write-loss
+    contract: OSError -> ERROR with path/reason/tool/session/outcome +
+    _write_failures counter; the entry is lost but the tool call CONTINUES
+    (auditing never breaks a call). No rotation/hash-chain (F-09 residual)."""
     entry = {
         "ts": round(time.time(), 3),
         "session": session_id,
@@ -85,7 +95,12 @@ KEEP_CAPTURES = 20
 def _save_capture(image) -> dict:
     """A client tool returned an image ({mime, data: base64}). A plugin tool's result is text
     to the model, so the image is saved as a file and Hermes is told to open it with its
-    vision_analyze tool (which shows it natively on vision-capable models, else describes it)."""
+    vision_analyze tool (which shows it natively on vision-capable models, else describes it).
+    Actor: untrusted client result. Control: png/jpeg/webp only, strict base64,
+    <=8 MiB, magic bytes must match the declared mime. Sink: 0600 capture file
+    (creation-only mode), oldest beyond KEEP_CAPTURES=20 pruned. Any check fails
+    -> {"image_error": ...} in the result (refused, not written); the model never
+    receives the raw bytes."""
     import base64
     import os
     import secrets

@@ -47,6 +47,9 @@ TOOLS_SCHEMA = {
 
 def _pre_llm_call(session_id=None, turn_id=None, parent_session_id=None,
                   is_first_turn=None, **kw):
+    """pre_llm_call: record turn/intent for the reviewer, tie a // command's lock
+    to its session, move bindings on rotating compression (never for a marked
+    subagent), and build the attached-clients context block."""
     if not session_id:
         return None
     if turn_id:
@@ -67,6 +70,8 @@ def _pre_llm_call(session_id=None, turn_id=None, parent_session_id=None,
 
 
 def _on_session_end(session_id=None, interrupted=False, **kw):
+    """on_session_end: unlock any // command this session ran; interrupted ->
+    cancel its in-flight client calls, else reset per-turn state."""
     if not session_id:
         return
     notebook.turn_ended(session_id)  # a // command's turn finished or was stopped: unlock
@@ -77,11 +82,15 @@ def _on_session_end(session_id=None, interrupted=False, **kw):
 
 
 def _subagent_start(child_session_id=None, **kw):
+    """subagent_start hook: mark the child session — the mark IS the
+    allow_subagents deny signal (registry.mark_subagent never refuses)."""
     if child_session_id:
         REGISTRY.mark_subagent(child_session_id)
 
 
 def _subagent_stop(child_session_id=None, **kw):
+    """subagent_stop hook: reclaim the mark (the only removal path; a missed stop
+    leaks memory, never authority)."""
     if child_session_id:
         REGISTRY.unmark_subagent(child_session_id)
 

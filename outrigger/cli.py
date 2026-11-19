@@ -26,6 +26,10 @@ def setup(subparser) -> None:
 
 
 def handle(args) -> int:
+    """Owner-only CLI dispatch: pair (mint, print the shown-once token), tokens
+    (list, never secrets), revoke (timestamp; live connections close within
+    ~20s). ValueError from mint -> error message + exit 2, nothing stored. No
+    remote input reaches this surface."""
     cmd = getattr(args, "outrigger_command", None)
     if cmd == "pair":
         try:

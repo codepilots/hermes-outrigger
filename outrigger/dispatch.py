@@ -34,7 +34,9 @@ def _err(code: str, message: str = "", **extra) -> str:
 
 def platform_chat_clients(session_id) -> list | None:
     """On an Outrigger-platform turn, the client serving this chat (task-local session
-    identity via the public get_session_env); None on other platforms."""
+    identity via the public get_session_env); None on other platforms. Subagent
+    gate applies here too: marked session + allow_subagents=false (default) -> []
+    (no client). Binds the session so per-turn bookkeeping (cancel, caps) applies."""
     try:
         from gateway.session_context import get_session_env
     except Exception:
@@ -60,6 +62,10 @@ def _clients(session_id, conversation_id):
 
 
 def _pick_client(session_id, conversation_id, wanted: str | None):
+    """Select the client for a call. Subagent gate: a marked session with
+    allow_subagents=false (default) -> outrigger_subagent_denied (the mark IS
+    the deny signal). No client / unknown / ambiguous -> JSON refusal listing
+    attached clients; only clients bound to this session/conversation."""
     clients = _clients(session_id, conversation_id)
     if not clients:
         if REGISTRY.is_subagent(session_id) and not settings.get("allow_subagents"):
@@ -86,6 +92,14 @@ def _pick_client(session_id, conversation_id, wanted: str | None):
 
 def outrigger_call(args: dict, session_id: str | None = None,
                    conversation_id: str | None = None, **_ignored) -> str:
+    """Actor: Hermes model (worker thread). Input: tool + args (+client).
+    Control, in order: shape check, client pick (subagent gate), declared-tool
+    lookup, validate_args BEFORE relay, per-turn cap max_calls_per_turn
+    (default 20), advisory reviewer for policy != auto (review=smart + LLM;
+    deny final only with review_deny="block", opt-in). Sink: relay to the
+    client device via _run; every outcome — including pre-client rejections —
+    audited with client.principal. Refusals are JSON error codes (bad_request/
+    no_client/subagent_denied/unknown_tool/bad_args/call_limit/review_denied)."""
     tool = args.get("tool")
     call_args = args.get("args")
     if call_args is None:
@@ -93,6 +107,9 @@ def outrigger_call(args: dict, session_id: str | None = None,
     sid = session_id or conversation_id or ""
 
     def reject(client_id, policy, text, principal=None):
+        """Audit-and-return a pre-client refusal: every rejection (bad request,
+        no/unknown client, unknown tool, bad args, call limit) is recorded with
+        outcome rejected:<code> before the error JSON goes back to the model."""
         audit.record(session_id=sid, client=client_id, tool=tool, args=call_args,
                      policy=policy, outcome="rejected:" + json.loads(text)["error"],
                      duration_s=0.0, principal=principal)
@@ -152,6 +169,14 @@ def outrigger_call(args: dict, session_id: str | None = None,
 
 def _run(client: Client, sid: str, decl, tool: str, call_args: dict, timeout: float,
          review: dict | None = None):
+    """Relay one call and bound the result. Control: per-client semaphore
+    (concurrency 1..8; queue time counts against the deadline), caller-computed
+    timeout min(decl.timeout_s or default_timeout_s=60, max_timeout_s=400) —
+    timeout sends cancel + logs INFO; ClientGone -> disconnected. Sink:
+    client.send(call) then the pending future. Untrusted result handling (F-07):
+    ok -> _format_ok (untrusted label + cap); error detail coerced/sanitized/
+    capped again here (ingress already bounded it); short gateway codes pass
+    through so the cancelled status survives. Returns (outcome, JSON) for audit."""
     deadline = time.monotonic() + timeout
     # Serialise per client (concurrency 1 by default); queue time counts against the deadline.
     if not client.sem.acquire(timeout=timeout):
@@ -203,6 +228,11 @@ def _run(client: Client, sid: str, decl, tool: str, call_args: dict, timeout: fl
 
 
 def _format_ok(content, decl) -> str:
+    """Bound an ok result before the model: capture images go to
+    audit._save_capture (0600 file + vision hint), content coerced to text,
+    sanitize_text caps at min(decl.max_result_chars, max_result_chars=20000).
+    Invariant: every ok result is labeled untrusted: True and truncated is
+    surfaced — client output is data, never instructions."""
     if isinstance(content, dict) and "image" in content:
         content = {**{k: v for k, v in content.items() if k != "image"}, **audit._save_capture(content["image"])}
     if not isinstance(content, str):
@@ -232,5 +262,8 @@ def outrigger_tools(args: dict, session_id: str | None = None,
 
 
 def cancel_session(session_id: str) -> None:
+    """Turn interrupted: end_turn resolves leftover futures as outrigger_cancelled
+    and a best-effort cancel frame goes to each client (_try_send swallows
+    ClientGone — the future already carries the outcome)."""
     for client, call_id in REGISTRY.end_turn(session_id, cancel=True):
         _try_send(client, {"type": "cancel", "call_id": call_id, "reason": "turn_interrupted"})

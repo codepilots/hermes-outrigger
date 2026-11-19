@@ -86,6 +86,10 @@ Answer with JSON: {"verdict": "approve"|"deny"|"escalate", "reason": "<one sente
 
 
 def configure(ctx) -> None:
+    """Actor: plugin register (trusted ctx). Wires ctx.llm and registers the
+    auxiliary review task inheriting Hermes's approval model. Fail loud, not
+    fatal: no register_auxiliary_task -> skip; inheritance unsupported -> INFO
+    + plain registration; that failing too -> WARNING (review still runs)."""
     global _llm
     _llm = getattr(ctx, "llm", None)
     register = getattr(ctx, "register_auxiliary_task", None)
@@ -105,12 +109,21 @@ def configure(ctx) -> None:
 
 
 def enabled() -> bool:
+    """Review is on only with review="smart" (default) AND an LLM wired by
+    configure; otherwise dispatch skips review entirely (no verdict)."""
     return settings.get("review") == "smart" and _llm is not None
 
 
 def review(*, tool: str, description: str, args: dict, client_name: str,
            client_context: str, user_request: str, recent_actions: list | None = None) -> dict:
-    """Return {"verdict", "reason"}. Never raises: failures escalate to the user."""
+    """Return {"verdict", "reason"}. Never raises: failures escalate to the user.
+    Actor: dispatch, for policy != auto calls. Control: args serialized FIRST
+    with a dedicated ARGS_BUDGET=8000 — unserializable or over budget -> forced
+    escalate (WARNING, fail closed) BEFORE any model call; context separately
+    bounded (CONTEXT_BUDGET=4000, truncation logged, args stay whole); wrapper-
+    tag defang (_DEFANG) on the data region. Sink: an advisory verdict travelling
+    with the call — dispatch makes deny final only when review_deny="block"
+    (opt-in, default "ask"). Model failure / unclear verdict -> escalate."""
     if not enabled():
         return {"verdict": "escalate", "reason": ""}
     # Serialize the operative arguments first and give them a dedicated budget.

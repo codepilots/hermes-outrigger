@@ -64,6 +64,9 @@ def _sig(decl) -> str:
 
 
 def build(session_id, conversation_id, max_chars: int) -> str | None:
+    """The attached-clients context block for the model (subagents get no clients
+    via the registry gate). Over context_max_chars -> names-only fallback, still
+    capped. Describes the surface and labels results untrusted; enforces nothing."""
     from .dispatch import platform_chat_clients
     clients = platform_chat_clients(session_id)
     if clients is None:

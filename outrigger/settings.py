@@ -21,6 +21,11 @@ _BOOL_FALSE = {"false", "0", "no", "off", ""}
 
 
 def _as_bool(key: str, value, default: bool) -> bool:
+    """Fail-closed bool coercion for trust switches. Actor: operator config
+    (possibly quoted YAML strings / 0/1). Control: true/false-ish strings and
+    0/1 normalized; anything unrecognized -> loud WARNING naming key/value/
+    default, then the DECLARED default — so a quoted "false" can never leave
+    allow_keyless_local / allow_remote / owner_key_remote on."""
     if isinstance(value, bool):
         return value
     if isinstance(value, str):
@@ -83,7 +88,9 @@ SETTINGS: dict = dict(DEFAULTS)
 
 
 def load(get_config) -> None:
-    """get_config is ctx.get_config(key, default)."""
+    """get_config is ctx.get_config(key, default). Reads every DEFAULTS key; a
+    raising get_config falls back to the declared default; bool-typed keys go
+    through _as_bool (unrecognized -> WARNING + default, fail closed)."""
     for key, default in DEFAULTS.items():
         try:
             raw = get_config(key, default)
@@ -93,4 +100,6 @@ def load(get_config) -> None:
 
 
 def get(key: str):
+    """The resolved switch value; falls back to the declared default when a key
+    was never loaded. Security modules read every trust switch through this."""
     return SETTINGS.get(key, DEFAULTS[key])
