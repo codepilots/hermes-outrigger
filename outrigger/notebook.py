@@ -26,6 +26,9 @@ log = logging.getLogger("hermes.plugins.outrigger")
 SNAPSHOTS_KEPT = 10
 WATCH_INTERVAL = 2.0
 LIST_LIMIT = 200
+LIST_WALK_LIMIT = 5000   # files visited per listing: bounds the walk itself, not just the results
+MAX_OPEN_DOCS = 64       # global cap on retained documents (each up to notebook_max_bytes)
+MAX_DOCS_PER_CLIENT = 16  # distinct notes one client may hold open at once
 _HIDDEN = re.compile(r"(^|/)\.")
 
 
@@ -101,12 +104,18 @@ def resolve(root: str, rel: str) -> Path:
 def listing(root: str | None = None, query: str = "", limit: int = 50, allowed: set | None = None) -> list[dict]:
     q = (query or "").lower().strip()
     found = []
+    visited = 0
+    capped = False
     for name, base in roots().items():
         if (root and name != root) or (allowed is not None and name not in allowed):
             continue
         for dirpath, dirnames, filenames in os.walk(base):
             dirnames[:] = [d for d in dirnames if not d.startswith(".")]
             for fn in filenames:
+                if visited >= LIST_WALK_LIMIT:
+                    capped = True
+                    break
+                visited += 1
                 if not fn.lower().endswith(".md") or fn.startswith("."):
                     continue
                 full = Path(dirpath) / fn
@@ -118,6 +127,12 @@ def listing(root: str | None = None, query: str = "", limit: int = 50, allowed: 
                 except OSError:
                     continue
                 found.append({"root": name, "path": rel, "title": fn[:-3], "mtime": int(st.st_mtime), "size": st.st_size})
+            if capped:
+                break
+        if capped:
+            break
+    if capped:
+        log.warning("outrigger notebook: doc.list walk stopped at the %d-file cap; listing may be incomplete", LIST_WALK_LIMIT)
     found.sort(key=lambda d: d["mtime"], reverse=True)
     return found[:max(1, min(int(limit or 50), LIST_LIMIT))]
 
@@ -133,6 +148,7 @@ class Doc:
     text: str = ""
     version: str = ""
     stat: tuple = ()
+    last_used: float = field(default_factory=time.monotonic)  # LRU order for cap eviction
     clients: set = field(default_factory=set)
     lock: dict | None = None
     mutex: threading.RLock = field(default_factory=threading.RLock)
@@ -168,6 +184,15 @@ def _write(doc: Doc, text: str) -> None:
     doc.text, doc.version, doc.stat = text, version_of(text), _stat(doc.full)
 
 
+def _evict_idle_docs(need: int) -> None:
+    """LRU-evict up to `need` retained docs that no client holds open and that are not
+    locked (a locked note may still have a running // command). Held notes are never touched."""
+    idle = sorted((d for d in DOCS.values() if not d.clients and not d.lock), key=lambda d: d.last_used)
+    for d in idle[:need]:
+        DOCS.pop(d.doc_id, None)
+        log.warning("outrigger notebook: evicted idle note %s under open-doc pressure", d.doc_id)
+
+
 def open_doc(root: str, rel: str, client, allowed: set | None = None) -> Doc:
     if allowed is not None and root not in allowed:
         raise NotebookError("no_root", f"unknown notebook root {root!r}")
@@ -176,13 +201,26 @@ def open_doc(root: str, rel: str, client, allowed: set | None = None) -> Doc:
         raise NotebookError("not_found", f"no note {rel}")
     doc_id = f"{root}:{Path(rel).as_posix()}"
     doc = DOCS.get(doc_id)
+    if doc is None or client not in doc.clients:
+        held = sum(1 for d in DOCS.values() if client in d.clients)
+        if held >= MAX_DOCS_PER_CLIENT:
+            log.warning("outrigger notebook: refused open of %s for client %s: %d notes already open (cap %d)",
+                        doc_id, getattr(client, "id", "?"), held, MAX_DOCS_PER_CLIENT)
+            raise NotebookError("too_many_docs", f"too many open notes (max {MAX_DOCS_PER_CLIENT}); close one first")
     if doc is None:
+        if len(DOCS) >= MAX_OPEN_DOCS:
+            _evict_idle_docs(len(DOCS) - MAX_OPEN_DOCS + 1)
+        if len(DOCS) >= MAX_OPEN_DOCS:
+            log.warning("outrigger notebook: refused open of %s: %d notes retained (global cap %d)",
+                        doc_id, len(DOCS), MAX_OPEN_DOCS)
+            raise NotebookError("too_many_docs", f"too many open notes on this gateway (max {MAX_OPEN_DOCS}); try again shortly")
         doc = Doc(doc_id=doc_id, root=root, path=Path(rel).as_posix(), full=full)
         _read(doc)
         DOCS[doc_id] = doc
     else:
         with doc.mutex:
             _check_disk(doc)
+    doc.last_used = time.monotonic()
     doc.clients.add(client)
     return doc
 

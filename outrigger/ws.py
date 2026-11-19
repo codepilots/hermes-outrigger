@@ -363,9 +363,13 @@ async def _handle_doc(client: Client, t: str, m: dict, ws) -> None:
             root = str_field(m.get("root"), "root", 64, default="") or None
             query = str_field(m.get("query"), "query", 200, default="")
             limit = int_field(m.get("limit"), "limit", 1, notebook.LIST_LIMIT, default=50)
-            await ws.send_json({"type": "doc.list", "roots": sorted(allowed),
-                                "notes": notebook.listing(root, query, limit, allowed)})
+            _rate_check(client)
+            # The tree walk must not block the shared event loop for other clients (F-03).
+            notes = await asyncio.get_running_loop().run_in_executor(
+                None, notebook.listing, root, query, limit, allowed)
+            await ws.send_json({"type": "doc.list", "roots": sorted(allowed), "notes": notes})
         elif t == "doc.open":
+            _rate_check(client)
             doc = notebook.open_doc(str(m.get("root") or ""), str(m.get("path") or ""), client, allowed)
             notebook.ensure_watcher()
             await ws.send_json(notebook.content_frame(doc))
