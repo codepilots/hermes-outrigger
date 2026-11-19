@@ -313,7 +313,9 @@ def snapshot(doc: Doc) -> str:
     d = _snap_dir(doc)
     d.mkdir(parents=True, exist_ok=True)
     sid = f"{time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(2)}"
-    (d / f"{sid}.md").write_text(doc.text, encoding="utf-8")
+    fd = os.open(d / f"{sid}.md", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(doc.text)
     for old in sorted(d.glob("*.md"))[:-SNAPSHOTS_KEPT]:
         old.unlink(missing_ok=True)
     return sid

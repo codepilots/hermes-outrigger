@@ -82,14 +82,15 @@ def outrigger_call(args: dict, session_id: str | None = None,
         call_args = {}
     sid = session_id or conversation_id or ""
 
-    def reject(client_id, policy, text):
+    def reject(client_id, policy, text, principal=None):
         audit.record(session_id=sid, client=client_id, tool=tool, args=call_args,
                      policy=policy, outcome="rejected:" + json.loads(text)["error"],
-                     duration_s=0.0)
+                     duration_s=0.0, principal=principal)
         return text
 
     if not isinstance(tool, str) or not isinstance(call_args, dict):
-        return _err("outrigger_bad_request", "'tool' must be a string and 'args' an object.")
+        return reject(None, None, _err("outrigger_bad_request",
+                                       "'tool' must be a string and 'args' an object."))
 
     client, problem = _pick_client(session_id, conversation_id, args.get("client"))
     if problem:
@@ -98,14 +99,16 @@ def outrigger_call(args: dict, session_id: str | None = None,
     if decl is None:
         return reject(client.id, None, _err(
             "outrigger_unknown_tool", f"{client.name} has no tool {tool!r}.",
-            tools=sorted(client.tools)))
+            tools=sorted(client.tools)), principal=client.principal)
     bad = validate_args(decl.parameters, call_args)
     if bad:
-        return reject(client.id, decl.policy, _err("outrigger_bad_args", bad))
+        return reject(client.id, decl.policy, _err("outrigger_bad_args", bad),
+                      principal=client.principal)
 
     if REGISTRY.count_call(sid, client) > settings.get("max_calls_per_turn"):
         return reject(client.id, decl.policy, _err(
-            "outrigger_call_limit", "Per-turn call limit reached for this client."))
+            "outrigger_call_limit", "Per-turn call limit reached for this client."),
+            principal=client.principal)
 
     started = time.monotonic()
     review = None
@@ -121,7 +124,8 @@ def outrigger_call(args: dict, session_id: str | None = None,
         if review["verdict"] == "deny" and settings.get("review_deny") == "block":
             audit.record(session_id=sid, client=client.id, tool=tool, args=call_args,
                          policy=decl.policy, outcome="rejected:outrigger_review_denied",
-                         duration_s=time.monotonic() - started, review=review)
+                         duration_s=time.monotonic() - started, review=review,
+                         principal=client.principal)
             return _err("outrigger_review_denied",
                         "Blocked by the outrigger reviewer: " + review["reason"]
                         + " Do not retry this action; explain to the user what you wanted to do.")
@@ -132,7 +136,7 @@ def outrigger_call(args: dict, session_id: str | None = None,
     REGISTRY.note_action(sid, tool, call_args, outcome)
     audit.record(session_id=sid, client=client.id, tool=tool, args=call_args,
                  policy=decl.policy, outcome=outcome, duration_s=time.monotonic() - started,
-                 review=review)
+                 review=review, principal=client.principal)
     return text
 
 
@@ -221,7 +225,9 @@ def _save_capture(image) -> dict:
     folder = home / "plugin-data" / "outrigger" / "captures"
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(3)}{ext}"
-    path.write_bytes(raw)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(raw)
     for old in sorted(folder.iterdir(), key=lambda p: p.stat().st_mtime)[:-KEEP_CAPTURES]:
         old.unlink(missing_ok=True)
     return {"image_path": str(path), "bytes": len(raw),
