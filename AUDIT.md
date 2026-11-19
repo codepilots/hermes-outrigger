@@ -1,385 +1,689 @@
-# Outrigger audit map
+# Outrigger: security audit guide
 
-Outrigger is a Hermes gateway plugin (Python 3.14, manifest v2) that lets a thin
-client — a browser side panel, a phone, an add-in — attach to the gateway over a
-WebSocket and offer tools that run **on the client's own device**, plus a
-notebook mode (edit `.md` notes on the host) and an "Outrigger" messaging
-platform (client chats go through Hermes's own pipeline). It mounts one route,
-`GET /v1/outrigger/ws`, on the `api_server` gateway app
-(`outrigger/__init__.py:19`, wired at `outrigger/__init__.py:122-131`); plugin
-routes get no gateway auth middleware, so the route authenticates itself
-(`outrigger/auth.py:104-163`). The privileged sinks are: the client device executing
-a tool call, the host note files, and the Hermes agent turn (which for the
-owner/admin carries terminal/file tools).
+This guide explains, in plain language, how the Outrigger plugin lets other devices
+connect to your Hermes gateway: what can go wrong, what stands in the way, and what
+risk is left over. It is written to be read top to bottom by a person.
 
-**Read first:** this map, then `docs/security-review/auth-trust-boundary.md`
-(the F-10 residual threat model — what the auth mitigations do and do not prove)
-and `docs/security-review/remediation.md` (the F-01..F-11 ledger). The ledger
-descriptions are claims from the remediation campaign; the anchors below were
-re-verified against the current tree at branch `refactor/human-audit` (from main
-at merge `27c07ba`), then re-resolved after the step-2 cohesion restructure
-(behavior-preserving code moves: auth surface → `auth.py`, notebook tool surface
-→ `notebook_tools.py`, capture writer → `audit.py`; no logic changed), and
-again after the step-3 docstring pass (docstrings/comments only — line numbers
-shifted, no logic changed). Where a
-control only *mitigates* (F-10), this map says mitigates + residual, never
-"fixed".
+How to read it:
 
-## Trust boundaries
+- Each topic follows the same pattern: **what happens**, **what could go wrong**,
+  **what protects you**, and **what's left** (the residual risk).
+- Diagrams come with a short "how to read this diagram" note.
+- Lines starting with **Code:** point at the exact source lines (`file:line`) for an
+  auditor who wants to check a claim. Skip them if you are reading for understanding.
+  CI checks that every one still points at real code.
+- Words in *italics* are explained in the [glossary](#glossary).
 
-Zones: the WS peer and any collaborator-written note text are **untrusted**; the
-gateway plugin is the control surface; the **owner device** is where client tools
-actually execute (the plugin relays, it does not sandbox — `docs/spec.md` §3);
-the **Hermes platform** runs the agent turn. Untrusted data crosses into
-privileged execution at three points: tool args → client execution, note body →
-the owner's `//` turn, and chat text → the Hermes pipeline.
+Deeper background: `docs/security-review/auth-trust-boundary.md` (the threat model for
+the sign-in limits described below) and `docs/security-review/remediation.md` (the
+ledger of every finding, F-01 to F-11, and how each was handled). Those are historical
+records; this guide is the living explanation.
+
+## The system in one minute
+
+Outrigger is a plugin for your Hermes gateway. It lets a small app on another device
+(the sidebar in your browser, a phone, an Office add-in) connect to Hermes and offer
+*client tools*: things Hermes can ask that device to do, which then run **on that
+device**, not on the gateway. It also adds two features:
+
+- **Notebook mode:** open `.md` notes that live on the Hermes machine, edit them
+  together, and ask Hermes to work on one by typing a `//` command in the note.
+- **The Outrigger chat platform:** chats from these apps go through Hermes's normal
+  chat pipeline, like a message from Discord would.
+
+It adds one web address to the gateway, `/v1/outrigger/ws` (a *WebSocket*). The
+gateway's own sign-in checks don't cover plugin addresses, so Outrigger checks every
+connection itself.
+
+The parties, and how much each is trusted:
+
+1. **You, the owner.** Full control. Your chats can use everything Hermes can,
+   including terminal and file tools on the Hermes machine.
+2. **Paired users.** People (or your own devices) you gave a *paired token*. They get
+   only what you granted: their own chats, a limited set of tools, and only the note
+   folders you shared.
+3. **Connected apps and the text they send.** Untrusted. Tool arguments, chat text and
+   note text all arrive from outside, and a note a collaborator wrote can contain text
+   aimed at tricking the AI (*prompt injection*).
+4. **Hermes, the AI.** Trusted to do useful work, but it can be fooled by what it
+   reads, so its requests to devices are checked.
+
+The security work comes down to three questions: **who is connecting?**, **what are
+they allowed to touch?**, and **should this request run?**
+
+## The main risks at a glance
+
+| # | Risk | Example | Main protection | What's left |
+|---|------|---------|-----------------|-------------|
+| 1 | A stranger connects as you | Something on the network reaches the gateway and is treated as the owner | Every connection must show the API key or a paired token, and remote access is off by default ([sign-in](#who-is-connecting-sign-in)) | **With no key configured at all, a local connection is let in as owner with no credential (on by default)**, and a relay on the same machine can look local |
+| 2 | Hermes makes a device do something harmful | A note tells Hermes to run a damaging tool on your laptop | The device's own approval rules, plus an AI reviewer's opinion ([tool requests](#how-a-tool-request-flows)) | The reviewer only advises by default; the device app is what actually asks you |
+| 3 | A paired user reaches beyond what you shared | A user edits a note outside their folder, or reads another person's chat | Folder grants checked on every edit; chats separated per token ([notebook](#notebook-who-may-edit-which-note), [chat separation](#chat-separation-and-admin-tools)) | Tools already running when you narrow a grant finish their command |
+| 4 | A paired user gets your powerful tools | A user's chat gets terminal access | Paired users get a narrow tool set unless marked admin ([admin tools](#chat-separation-and-admin-tools)) | The gateway knows users, not tokens, so mixed admin/non-admin tokens for one user behave conservatively, with edge cases |
+| 5 | A leaked token keeps working | You revoke a lost phone's token | Revoked tokens are refused at once for new connections ([tokens](#paired-tokens)) | An already-open connection lasts up to about 20 seconds more |
+| 6 | Malformed input breaks something | An oversized schema or a crafted tool name | Strict checks on every message and tool description ([input checks](#input-checks)) | Relies on the `jsonschema` library being installed (refuses tool schemas without it) |
+| 7 | A record of what happened goes missing | The audit file can't be written | Failures are logged loudly and counted ([audit trail](#audit-trail)) | No tamper-evidence; notes and chats aren't in the audit file |
+
+The full list, ranked, is in [Residual risks](#residual-risks).
+
+## Defaults you should know
+
+Settings live under the plugin's config in Hermes. Out of the box:
+
+| Setting | Default | What it means for you |
+|---------|---------|-----------------------|
+| `allow_remote` | **off** | Only connections from the Hermes machine itself are accepted. Turn on to let other devices in with a paired token |
+| `owner_key_remote` | **off** | Even with remote access on, the API key only works locally; remote devices need a paired token |
+| `allow_keyless_local` | **on** | If no key is configured anywhere, a local connection is accepted as **owner with no credential**. Configure a key, or turn this off |
+| `review` | **smart** (on) | An AI reviewer gives an opinion on each tool request that isn't automatic |
+| `review_deny` | **ask** | When the reviewer says "deny", the request still goes to your device, marked as flagged, for you to decide. `block` makes a deny final |
+| `allow_subagents` | **off** | Helper agents Hermes starts can't use your devices or notes |
+| `notebook_roots_for` | **empty** | Paired users can open no notes until you share a folder with them |
+| `user_toolsets` | web, outrigger, no MCP | What paired non-admin users' chats can use: no terminal or file tools |
+| `max_calls_per_turn` | 20 | A single Hermes turn can make at most 20 device tool calls |
+| `audit_args` | **off** | The audit file records that a tool ran, not its arguments |
+
+Settings written as text (`"false"`) are read correctly as on/off; an unreadable value
+falls back to the default above, with a warning.
+
+Code: outrigger/settings.py:43-85 (defaults), outrigger/settings.py:23-41 (reading
+on/off values), outrigger/settings.py:90-99 (loading)
+
+## Who talks to whom
+
+**What this diagram shows:** the four zones and the paths data takes between them.
+Boxes are parts of the system; arrows are data moving. The danger points are where an
+arrow leaves the untrusted zone on the left, and where something reaches the right
+side, where real effects happen: a device runs a tool, a note file changes, or Hermes
+takes a turn.
 
 ```mermaid
 flowchart LR
-  subgraph untrusted["Untrusted client / page"]
-    F["WS frames: tool args, chat text, doc text"]
-    N["Collaborator-written note body"]
+  subgraph untrusted[Connected apps - untrusted]
+    F[messages: tool replies, chat text, note edits]
+    N[note text a collaborator wrote]
   end
-  subgraph gateway["Gateway plugin (outrigger)"]
-    A["authenticate / authorize<br/>outrigger/auth.py:104-163"]
-    V["validation<br/>outrigger/protocol.py:140-241<br/>outrigger/ws.py:184-201 (_decode)"]
-    R["reviewer (advisory unless review_deny=block)<br/>outrigger/reviewer.py:117-184"]
-    D["dispatch relay<br/>outrigger/dispatch.py:93-227"]
-    NB["notebook access control<br/>outrigger/notebook.py:301-318 (get)<br/>outrigger/notebook_tools.py:21-41 (doc_for_tool)"]
-    P["platform inbound<br/>outrigger/platform.py:420-438"]
-    NF["host .md notes (atomic write)<br/>outrigger/notebook.py:204-215"]
+  subgraph gateway[Outrigger plugin on the gateway]
+    A[sign-in check]
+    V[input checks]
+    R[AI reviewer - advises]
+    D[tool request relay]
+    NB[note access check]
+    P[chat platform]
+    NF[note files on the Hermes machine]
   end
-  subgraph owner["Owner device"]
-    T["client tool execution<br/>(client policy + user approval)"]
+  subgraph owner[Your device]
+    T[tool runs, under the app's own approval rules]
   end
-  subgraph hermes["Hermes platform"]
-    H["agent turn / model"]
+  subgraph hermes[Hermes]
+    H[AI turn]
   end
-  F --> A --> V
-  V --> R --> D --> T
-  T -->|"result: untrusted, capped"| D --> H
-  F -->|"chat.send"| P --> H
-  N -->|"// turn: body labeled untrusted"| P
-  V -->|"doc.update / doc.command"| NB
-  H -->|"outrigger_call"| D
-  H -->|"notebook_edit via doc_for_tool"| NB
+  F -- 1 connect and send --> A --> V
+  V -- 2 checked tool request --> R --> D -- 3 run this tool --> T
+  T -- 4 result, marked untrusted and size-capped --> D --> H
+  F -- 5 chat message --> P --> H
+  N -- 6 note text, labelled untrusted --> P
+  V -- 7 note edits and // commands --> NB
+  H -- 8 tool request --> D
+  H -- 9 note read or edit --> NB
   NB --> NF
 ```
 
-Notes on the crossings:
-- Tool args reach the client only after `validate_args`
-  (`outrigger/dispatch.py:130-133`) and, for non-`auto` policy with the reviewer
-  on, an advisory review (`outrigger/dispatch.py:141-158`). The `confirm` /
-  `deny_when_unattended` policy is **binding on the client, advisory to Hermes**
-  (`docs/spec.md` §7; `outrigger/context.py:19-27`); the plugin does not itself
-  pop a confirmation prompt — the client UI does.
-- The note body is framed as untrusted data in the `//` turn message
-  (`outrigger/notebook.py:486-496`) and `notebook_read` results carry
-  `untrusted: True` (`outrigger/notebook_tools.py:87`). This is labeling, not
-  isolation: the model still reads collaborator text.
-- Client tool results are labeled `untrusted: True` and size-capped before the
-  model sees them (`outrigger/dispatch.py:230-243`).
+How to read it, arrow by arrow:
 
-## Entry points → controls → sinks
+1. **App → sign-in.** Every connection is checked before anything else
+   ([sign-in](#who-is-connecting-sign-in)).
+2. **Input checks → reviewer.** Messages and tool arguments are checked for shape and
+   size first ([input checks](#input-checks)).
+3. **Relay → your device.** The tool runs on the device. Outrigger passes requests
+   on; it doesn't contain or sandbox what the device does. The device app's own rules
+   decide whether to ask you.
+4. **Result → Hermes.** What comes back is labelled untrusted and cut to a maximum
+   size before the AI sees it.
+5. **Chat → Hermes.** Chats join Hermes's normal pipeline, with tool limits for
+   paired users ([admin tools](#chat-separation-and-admin-tools)).
+6. **Note text → Hermes.** When you type a `//` command, the note's text goes to
+   Hermes labelled as untrusted. **This is a label, not a wall:** Hermes still reads
+   whatever a collaborator wrote.
+7. **Note edits.** Every edit from an app is checked against the folders that user
+   was granted ([notebook](#notebook-who-may-edit-which-note)).
+8. **Hermes → relay.** Hermes asking a device to run a tool (arrow 3 continues it).
+9. **Hermes → notes.** Hermes can read or edit only the note whose `//` command it is
+   currently working on.
 
-Every control claim names the config that enables it and whether it is
-default or opt-in. "Refuses" = the code path returns an error / closes; it does
-not imply the control holds across a whole deployment.
+Code: outrigger/__init__.py:19 (the one address), outrigger/__init__.py:122-131
+(where it is added), docs/spec.md:40-41 (the plugin passes requests on, it doesn't
+sandbox)
 
-| Entry | Boundary | Control (invariant) | Sink | Code anchor |
-|-------|----------|---------------------|------|-------------|
-| WS handshake / auth | untrusted → gateway | `authenticate` then `authorize`: paired `otr_` token (constant-time hash compare) or owner via API key; keyless-local owner only when no key resolves anywhere AND `allow_keyless_local` (default **true**, opt-out) AND locality heuristic holds. Remote token needs `allow_remote` (default **false**); remote API key needs `allow_remote` AND `owner_key_remote` (both default **false**). Locality = loopback AND no `PROXY_HEADERS` — a heuristic a header-less relay can defeat (F-10 residual). | session bind / upgrade | `outrigger/auth.py:104-163`, `outrigger/auth.py:33-48`, `outrigger/auth.py:78-86`, `outrigger/tokens.py:132-152` |
-| Key source resolution | gateway config → route | `_expected_key` precedence: plugin `auth_token` > gateway adapter's resolved `_api_key` (`app['api_server_adapter']`) > env `API_SERVER_KEY`. A config-keyed gateway does not fall into keyless mode. Residual: gateways without the adapter hook fall back to plugin+env view. | owner admission | `outrigger/auth.py:33-48` |
-| Token pairing / revocation | owner CLI → store → gateway | `mint` stores SHA-256 hash only, file mode 0600, shown once; `verify` constant-time (dummy compare on unknown id); `revoke` sets timestamp; live connections close on the ≤20 s keepalive check; store re-read on mtime change (no restart). | scoped client access | `outrigger/tokens.py:83-123`, `outrigger/tokens.py:65-76`, `outrigger/tokens.py:132-161`, `outrigger/ws.py:106-115`, `outrigger/cli.py:28-63` |
-| Protocol / tool-decl validation | untrusted → gateway | `ToolDecl.parse`: name regex `_NAME_RE` (`\Z` anchor), policy in {auto,confirm,deny_when_unattended} (default confirm), schema via `check_schema`. `parse_tools` ≤64 tools. Schema: ≤32 KiB, depth ≤24, no `patternProperties`, non-local `$ref`/`$dynamicRef`/`$recursiveRef` refused; local-only registry refuses all retrieval (SSRF backstop); `jsonschema` ImportError fails closed + ERROR. | accepted tool catalog | `outrigger/protocol.py:27`, `outrigger/protocol.py:47-97`, `outrigger/protocol.py:140-178`, `outrigger/protocol.py:122-137`, `outrigger/protocol.py:185-201` |
-| Args validation | model → gateway → client | `validate_args` against the declared schema; non-local ref refused even in the no-jsonschema fallback; `pattern` keyword dropped gateway-side (ReDoS); unknown type keyword fails closed; fallback `_minimal_validate` when jsonschema absent. Bad args → `outrigger_bad_args`, audited. | client tool call | `outrigger/protocol.py:218-241`, `outrigger/protocol.py:204-215`, `outrigger/protocol.py:255-301`, `outrigger/dispatch.py:130-133` |
-| Name / chat-id regexes | untrusted → gateway | `_NAME_RE` and `_CHAT_ID_RE` use `\Z` (trailing LF rejected, F-11); `TOKEN_RE`/`USER_RE` likewise. | tool routing / chat routing | `outrigger/protocol.py:27`, `outrigger/ws.py:258`, `outrigger/tokens.py:33-34` |
-| Reviewer approval | model → gateway → client | For policy ≠ auto AND `review="smart"` (default) with an LLM available: args serialized first; over `ARGS_BUDGET`=8000 or unserializable → forced `escalate` before any model call (fail closed). Verdicts approve/deny/escalate are **advisory** and travel with the call; a `deny` is final gateway-side **only** when `review_deny="block"` (opt-in; default `"ask"`). Reviewer failure / no verdict → escalate. | call relay or refusal | `outrigger/reviewer.py:111-184`, `outrigger/reviewer.py:40-47`, `outrigger/dispatch.py:141-158`, `outrigger/settings.py:69-72` |
-| Dispatch relay + error cap + audit | gateway → client → model | Per-client semaphore (concurrency 1..8), per-turn call cap `max_calls_per_turn` (default 20), timeout `min(decl, max_timeout_s=400)`. Ok results labeled untrusted + capped `min(decl.max_result_chars, max_result_chars=20000)`; error field coerced + capped at ingress, then sanitized + capped again in `_run` (F-07). Every outcome audited — `client.principal` once a client is picked, `principal=None` for pre-client rejections; one documented exception: a capture-write OSError in `_save_capture` propagates and skips that call's audit record (fail loud; hardening follow-up). | model tool result | `outrigger/dispatch.py:93-227`, `outrigger/dispatch.py:230-243`, `outrigger/ws.py:439-457`, `outrigger/audit.py:39-85` |
-| Notebook open / get / update / command | untrusted → host files | `allowed_roots` (owner: all; token user: `notebook_roots_for` grant, default `{}` = none). `resolve` blocks `..`/absolute/hidden/out-of-root symlink, `.md` only. `get()` re-checks the resolved location against granted roots' directories **every operation** (F-05 narrowing revokes client writes). Doc keyed by resolved file identity (one mutex/lock/version). Caps `MAX_OPEN_DOCS`=64 / `MAX_DOCS_PER_CLIENT`=16; LRU evicts only clientless+unlocked, else refuses. Lock + version conflict checks; `doc.list` walk bounded (5000) off-loop; rate limit on list/open/command for non-admin. | host `.md` write | `outrigger/notebook.py:69-81`, `outrigger/notebook.py:98-117`, `outrigger/notebook.py:301-318`, `outrigger/notebook.py:228-276`, `outrigger/notebook.py:218-225`, `outrigger/notebook.py:337-353`, `outrigger/ws.py:310-402` |
-| Notebook tools (`notebook_read`/`notebook_edit`) | model → host files | `doc_for_tool`: only the note whose `//` command is running in this chat; subagents denied (the mark is the deny signal). Authorization decided at command start (via `get()`); **decided behavior** (owner, 19 Nov 2026): mid-turn grant narrowing does NOT abort the in-flight command — its tool calls continue until `end_command`; client writes are revoked immediately. `tool_edit` refreshes from disk before the version compare (no clobber); unreadable → JSON refusal. | host `.md` write | `outrigger/notebook_tools.py:21-41`, `outrigger/notebook_tools.py:72-137`, `outrigger/notebook.py:451-511` |
-| Subagent gate | delegated child → clients/notes | `subagent_start` marks the child session; the mark IS the `allow_subagents` (default **false**) deny signal — `mark_subagent` never evicts and never refuses (overflow retained, loud WARNING at `MAX_TRACKED_SUBAGENTS`=1024, a warning threshold not a bound). Marked sessions get no clients (`for_session`, dispatch) and no notebook tools. `allow_subagents=true` permits client calls but notebook tools still deny subagents. | client call / note edit denial | `outrigger/registry.py:147-185`, `outrigger/registry.py:215-239`, `outrigger/__init__.py:84-95`, `outrigger/dispatch.py:46-47`, `outrigger/dispatch.py:71-73`, `outrigger/notebook_tools.py:36-37` |
-| Settings bool coercion | config → trust switches | `settings.load` coerces bool-typed settings via `_as_bool` (true/false-ish strings, 0/1); unrecognized → loud WARNING + declared default (fail closed). Fixes quoted `"false"` leaving `allow_keyless_local`/`allow_remote`/`owner_key_remote` on. | trust switches | `outrigger/settings.py:23-41`, `outrigger/settings.py:90-99`, `outrigger/settings.py:48-54` |
-| Admin scope (live-connection narrowing) | token user → Hermes toolsets/slash | `toolsets_for_user`: owner → full; a live non-admin connection of the user narrows their chats to `user_toolsets` even if another token is admin; registry race → restricted (fail closed); no live connection → per-user admin fallback. `access_extra` derives `allow_admin_from` from the same function. Residual (API gap): gateway identifies callers by user_id only — mixed connections narrow both, connectionless turns use per-user admin, first `doc.command` sync race. | Hermes toolset / slash gating | `outrigger/platform.py:131-164`, `outrigger/platform.py:117-128`, `outrigger/platform.py:407-417`, `outrigger/platform.py:420-438` |
-| Chat namespace / prompt isolation | token user → other chats | Token chats prefixed by token id (`_prefix`); `home` is owner-only; `chat.action`/`chat.stop` require `owns`; prompt answers require the pending prompt's chat to match. | cross-chat access denial | `outrigger/platform.py:80-95`, `outrigger/platform.py:177-181`, `outrigger/platform.py:321-326`, `outrigger/ws.py:281-294` |
-| Session bind (owner-only) | token user → API session | `bind` refused for non-owner; token clients' `session_id` forced None at register. | API session binding | `outrigger/ws.py:427-434`, `outrigger/ws.py:235-236` |
+## Who is connecting (sign-in)
 
-## Key workflows
+*How Outrigger decides who you are when a device connects.*
 
-Each node/edge below maps to a real code path (anchors in the tables above and
-inline). Async/concurrent flows (watcher, keepalive) are kept minimal.
+**What happens:** a connecting app shows one of two credentials:
 
-### (a) Tool-call round trip
+- **The API key:** the gateway's master key. Whoever holds it is the owner.
+- **A paired token** (`otr_…`), made with `hermes outrigger pair`. It belongs to one
+  user, gives only what you granted, and can be revoked.
+
+Then Outrigger checks *where* the connection comes from. "Local" means it came from
+the Hermes machine itself and carries none of the headers a reverse proxy or tunnel
+adds. Remote connections need `allow_remote`; the API key from a remote device also
+needs `owner_key_remote`. Both are off by default.
+
+**How to read this diagram:** start at the top with an incoming connection and follow
+the questions down to a box. Boxes starting "Refused" turn the connection away. The
+two "Let in as OWNER" boxes are where someone gets full control: the one ending "with
+no credential" is the risky one, because nobody showed a key.
+
+```mermaid
+flowchart TD
+  Req[A device connects] --> Tok{Is it showing a paired token?}
+  Tok -- yes --> Ver{Is the token real and not revoked?}
+  Ver -- no --> R401[Refused: bad or revoked token]
+  Ver -- yes --> RemT{Is it local, or is remote access turned on?}
+  RemT -- no --> R403t[Refused: remote token not allowed]
+  RemT -- yes --> Token[Let in as that paired user]
+  Tok -- no --> Key{Is a key configured anywhere?}
+  Key -- no --> Loc1{Does it look local?}
+  Loc1 -- no --> R403r[Refused]
+  Loc1 -- yes --> AKL{Is keyless local access on? default yes}
+  AKL -- no --> R403k[Refused, with a warning saying how to fix it]
+  AKL -- yes --> Owner1[Let in as OWNER with no credential, with a loud warning]
+  Key -- yes --> Loc2{Local, or both remote settings on?}
+  Loc2 -- no --> R403key[Refused: API key not allowed from outside]
+  Loc2 -- yes --> Cmp{Does the key match?}
+  Cmp -- no --> R401k[Refused: wrong key]
+  Cmp -- yes --> Owner2[Let in as OWNER]
+```
+
+**Where the key comes from:** Outrigger looks for the key in this order: the plugin's
+own `auth_token` setting, then the key the gateway itself uses, then the
+`API_SERVER_KEY` environment variable. So a gateway with a key in its config isn't
+mistaken for a gateway with no key.
+
+**What could go wrong:**
+
+- **"Looks local" is a guess, not proof.** If something on the Hermes machine relays
+  network traffic without adding proxy headers (an `ssh -L` tunnel, `socat`, a bare
+  web server proxy), outside connections arrive looking local. With no key configured
+  and keyless access on (the default), such a connection is let in as owner. Each
+  time this happens, the log says so loudly. There is no reliable way to tell these
+  apart over a normal network connection; the real fix (a local-only socket that
+  identifies the process) is outside this plugin's current design.
+- **Gateways that don't share their key.** On gateway versions that don't expose
+  their key to plugins, Outrigger only sees its own setting and the environment
+  variable, so it may believe no key exists. Both currently installed gateway variants
+  do share it.
+
+**What protects you:** configure a key (any of the three places), or set
+`allow_keyless_local` to off. Either removes the no-credential owner path entirely.
+Credentials are compared in constant time, so timing doesn't leak how much of a key
+was right. A browser web page can't use your gateway because the gateway itself
+rejects unknown browser origins; Outrigger doesn't add its own check here, so **never
+set `cors_origins: '*'` on a gateway without a key**.
+
+**What's left:** see risk 1 in [Residual risks](#residual-risks).
+
+Code: outrigger/auth.py:105-166 (the whole check), outrigger/auth.py:34-49 (where the
+key comes from), outrigger/auth.py:79-87 (what "looks local" means),
+outrigger/auth.py:149-155 (owner with no credential, and its warning),
+outrigger/auth.py:145-148 (refused when keyless access is off), outrigger/tokens.py:135-155
+(token check)
+
+## Paired tokens
+
+*How you hand out and take back limited access.*
+
+**What happens:** `hermes outrigger pair --user <name>` makes a token and shows it
+once. Only a scrambled fingerprint (a SHA-256 *hash*) is stored, in a file only your
+account can read. You paste the token into the device. Revoking marks it revoked; the
+store is re-read automatically when the file changes, so no restart is needed.
+
+**How to read this diagram:** time runs top to bottom. It follows one token from
+creation, through use, to revocation. The last two lines show the delay: an open
+connection is only checked every 20 seconds.
 
 ```mermaid
 sequenceDiagram
-  participant C as Client (owner device)
-  participant W as ws.py
-  participant R as registry
-  participant D as dispatch.py
-  participant V as reviewer.py
-  participant A as audit.py
-  participant H as Hermes model
-  C->>W: HTTP upgrade (Bearer key / otr_ token)
-  W->>W: authenticate / authorize (auth.py:104-163)
-  W-->>C: 401/403 refusal OR upgrade
-  C->>W: hello (within 10s)
-  W->>R: _register / add (ws.py:208-247)
-  W-->>C: welcome (limits, platform)
-  H->>D: outrigger_call{tool,args} (worker thread)
-  D->>R: pick client (dispatch.py:122-124)
-  D->>D: decl lookup, validate_args (dispatch.py:125-133)
-  D->>R: count_call per-turn cap (dispatch.py:135-138)
-  D->>V: review if policy not auto and review=smart (dispatch.py:141-147)
-  V-->>D: verdict (advisory, deny with block rejects)
-  D->>C: call{args, review} via client.send (dispatch.py:190-197)
-  C->>C: client policy prompt then execute
-  C->>W: result (ws.py:439-457)
-  W->>R: resolve future
+  participant O as You (command line)
+  participant T as Token store
+  participant C as Device
+  participant W as Outrigger
+  participant P as Chat platform
+  O->>T: make a token (hermes outrigger pair)
+  T-->>O: token shown once, only its fingerprint kept
+  O->>C: you paste the token into the device
+  C->>W: connect with the token
+  W->>T: check it
+  W-->>C: welcome: own chats, limited tools
+  C->>P: send a chat, which refreshes the access lists
+  O->>T: revoke the token
+  W->>T: every 20 seconds, is it still active?
+  W-->>C: connection closed within about 20 seconds
+```
+
+**What could go wrong:** a lost device keeps its connection briefly after you revoke.
+**What protects you:** new connections with a revoked token are refused immediately,
+and an open one closes at the next 20-second check. This delay is a deliberate design
+choice. Checking an unknown token takes the same time as checking a known one.
+
+**What's left:** up to about 20 seconds of continued access after revoking. Also, if
+the token file is damaged into the wrong shape (for example, valid JSON that isn't a
+list of tokens), loading it raises an error rather than treating the store as empty:
+nobody gets in, and the log shows the error (finding H-02; a fix is open in PR #4).
+
+Code: outrigger/tokens.py:86-111 (make), outrigger/tokens.py:114-126 (revoke),
+outrigger/tokens.py:68-79 (saved readable only by you), outrigger/tokens.py:44-65
+(loading, finding H-02), outrigger/tokens.py:158-164 (still active?),
+outrigger/ws.py:107-116 (the 20-second check), outrigger/ws.py:36 (the interval),
+outrigger/cli.py:28-63 (the pair command)
+
+## How a tool request flows
+
+*What happens, start to finish, when Hermes asks a device to do something.*
+
+**What happens:** Hermes calls `outrigger_call` with a tool name and arguments. The
+request is checked, optionally reviewed, sent to the device, and the answer comes back.
+
+**How to read this diagram:** time runs top to bottom; each arrow is one message. The
+first half is the device connecting; the second half is one tool request.
+
+```mermaid
+sequenceDiagram
+  participant C as Your device
+  participant W as Outrigger connection
+  participant R as List of connected devices
+  participant D as Tool relay
+  participant V as AI reviewer
+  participant A as Audit file
+  participant H as Hermes
+  C->>W: connect with key or token
+  W->>W: sign-in check
+  W-->>C: refused, or connected
+  C->>W: hello, within 10 seconds
+  W->>R: add to the list
+  W-->>C: welcome, with limits
+  H->>D: please run this tool with these arguments
+  D->>R: pick a device that offers this tool
+  D->>D: check the arguments match what the tool declared
+  D->>R: count it against this turn's limit of 20
+  D->>V: ask the reviewer, unless the tool is automatic
+  V-->>D: approve, deny or escalate (advice only, by default)
+  D->>C: run it, with the reviewer's opinion attached
+  C->>C: the device app asks you if its rules say so, then runs it
+  C->>W: the result
+  W->>R: match it to the waiting request
   R-->>D: result
-  D->>D: _format_ok / error cap, untrusted (dispatch.py:211-227)
-  D->>A: record(principal, outcome) (dispatch.py:164-166)
-  D-->>H: tool result JSON
+  D->>D: label it untrusted and cut it to size
+  D->>A: write an audit record
+  D-->>H: the result
 ```
 
-### (b) Token pairing → scoped access → revoke
+Limits along the way: each device runs one request at a time unless it asks for more (up to 8), each request has a
+time limit (at most 400 seconds), each Hermes turn can make at most 20 device calls,
+and results are cut to 20,000 characters. Error messages from the device are cleaned
+and shortened too.
 
-```mermaid
-sequenceDiagram
-  participant O as Owner (CLI)
-  participant T as tokens.py store
-  participant C as Client
-  participant W as ws.py
-  participant P as platform.py
-  O->>T: mint (hermes outrigger pair) (tokens.py:83-108)
-  T-->>O: token shown once, SHA-256 hash stored 0600
-  O->>C: paste token out-of-band
-  C->>W: upgrade Bearer otr_...
-  W->>T: verify, constant-time (tokens.py:132-152)
-  W-->>C: welcome (own chats, user_toolsets)
-  C->>P: chat.send (receive calls sync_access) (platform.py:420-438)
-  O->>T: revoke (tokens.py:111-123)
-  W->>T: keepalive is_active every 20s (ws.py:106-115)
-  W-->>C: close 4401 within ~20s
-```
+**What could go wrong:** a note or web page tricks Hermes into asking for a harmful
+action. **What protects you:** the device app's own rules (the next section) and the
+reviewer's opinion. **What's left:** Outrigger itself doesn't ask you; the device
+app does. If a device app ignores its own rules, Outrigger won't stop it.
 
-Revocation latency is ~20 s by design (the keepalive interval,
-`outrigger/ws.py:35` `PING_INTERVAL=20`); new handshakes fail immediately via
-`verify`, and the next `receive` re-syncs the access lists
-(`outrigger/platform.py:429`). This is a documented design choice, not a bug
-(ledger: rejected revocation-latency findings).
+Code: outrigger/dispatch.py:96-230 (the relay), outrigger/dispatch.py:125-127 (pick a
+device), outrigger/dispatch.py:133-136 (argument check), outrigger/dispatch.py:138-141
+(per-turn limit), outrigger/dispatch.py:193-200 (sent to the device),
+outrigger/dispatch.py:233-246 (labelled untrusted, cut to size), outrigger/ws.py:440-458
+(results arriving), outrigger/ws.py:209-248 (adding a device)
 
-### (c) Approval decision tree
+## Approving tool requests
+
+*Who decides whether a requested tool actually runs.*
+
+**What happens:** each tool a device offers declares a policy:
+
+- **auto:** runs without asking (for harmless things).
+- **confirm:** the device should ask you first. This is the default.
+- **deny_when_unattended:** refuse unless you're actively using the device.
+
+These policies are **carried out by the device app**. For Hermes, they are only
+information. Outrigger adds an AI *reviewer*: for any tool that isn't automatic, it
+asks an AI to judge the request and attaches the opinion (approve, deny, or escalate
+meaning "ask the human") to the request.
+
+**How to read this diagram:** start at the top with a request and follow the
+questions down. Almost every path ends at "sent to your device, with advice". Only
+one path refuses the request on the gateway: a deny with `review_deny` set to `block`.
 
 ```mermaid
 flowchart TD
-  S["outrigger_call: decl.policy"] --> Auto{"policy == auto?"}
-  Auto -->|yes| Dispatch["dispatch call (no review)<br/>client runs per its policy"]
-  Auto -->|no| Enabled{"reviewer.enabled?<br/>review=smart (default) & LLM present"}
-  Enabled -->|no| Dispatch
-  Enabled -->|yes| Budget{"args serializable AND<br/>len <= ARGS_BUDGET (8000)?"}
-  Budget -->|no| Esc["forced escalate (fail closed,<br/>before any model call)"]
-  Budget -->|yes| Model["model verdict:<br/>approve / deny / escalate<br/>(failure or unclear => escalate)"]
+  S[Hermes asks to run a tool] --> Auto{Is the tool marked automatic?}
+  Auto -- yes --> Dispatch[Sent to your device without review. The device follows its own rules]
+  Auto -- no --> Enabled{Is the reviewer on and an AI available?}
+  Enabled -- no --> Dispatch
+  Enabled -- yes --> Budget{Are the arguments small enough to review in full?}
+  Budget -- no --> Esc[Marked: ask the human. No partial review is attempted]
+  Budget -- yes --> Model[The reviewer says approve, deny or escalate. Errors or unclear answers count as escalate]
   Esc --> Adv
-  Model --> Deny{"verdict == deny AND<br/>review_deny == block (opt-in)?"}
-  Deny -->|yes| Block["reject gateway-side, audited<br/>(dispatch.py:151-158)"]
-  Deny -->|no| Adv["dispatch call with review advisory<br/>(default review_deny=ask)"]
-  Adv --> Client["client decides: confirm prompt /<br/>deny_when_unattended focus check"]
+  Model --> Deny{Did it say deny, and is review_deny set to block?}
+  Deny -- yes --> Block[Refused on the gateway, and recorded in the audit file]
+  Deny -- no --> Adv[Sent to your device with the reviewer's opinion attached]
+  Adv --> Client[Your device decides: ask you, or refuse if you aren't there]
 ```
 
-The only gateway-side final refusal here is `deny` + `review_deny="block"`
-(opt-in). With the default `review_deny="ask"`, every verdict — including deny —
-is advisory metadata the client must surface to the user
-(`outrigger/dispatch.py:148-158`, `outrigger/dispatch.py:195-196`).
+**What could go wrong:** the reviewer approves something harmful, or the device app
+ignores a "deny" opinion. **What protects you:** with the default `review_deny =
+ask`, a deny reaches your device as a flagged request for you to decide; set it to
+`block` to make denials final on the gateway. Arguments too large to review in full
+(over 8,000 characters) are never judged on a partial view; they're marked "ask the
+human".
 
-### (d) Locality / auth decision
+**What's left:** by default the reviewer only advises. Your protection against a
+harmful request is the device app showing you a prompt.
+
+Code: outrigger/reviewer.py:111-184 (the reviewer), outrigger/reviewer.py:40-47 (size
+limit and cleaning), outrigger/reviewer.py:132-142 (too large means ask the human),
+outrigger/reviewer.py:179-183 (errors mean ask the human), outrigger/dispatch.py:144-161
+(where the opinion is used, and the block option), outrigger/dispatch.py:198-199 (the
+opinion travels with the request), outrigger/settings.py:69-72 (review settings),
+outrigger/context.py:19-27 (policies are information for Hermes)
+
+## Input checks
+
+*How Outrigger handles malformed or hostile messages.*
+
+**What happens:** everything a device sends is checked before use.
+
+- **Tool descriptions:** names must match a strict pattern; at most 64 tools per
+  device; the description of each tool's arguments (its *schema*) must be under 32 KB,
+  not too deeply nested, and may not point at outside web addresses. Outrigger never
+  fetches anything a schema points to.
+- **Tool arguments** from Hermes are checked against the tool's schema before being
+  sent. Text-pattern rules in schemas are ignored on the gateway, because a crafted
+  pattern can make checking take forever.
+- **Names and chat ids** reject sneaky trailing line breaks (finding F-11).
+- **If the `jsonschema` library is missing,** tool schemas are refused outright
+  (with an error in the log) and arguments get a simpler built-in check.
+
+**What's left:** the checks rely on the `jsonschema` library for full validation.
+
+Code: outrigger/protocol.py:27 (name pattern), outrigger/protocol.py:47-97 (tool
+descriptions), outrigger/protocol.py:140-178 (schema limits), outrigger/protocol.py:122-137
+(no outside addresses), outrigger/protocol.py:185-201 (never fetched),
+outrigger/protocol.py:204-215 (pattern rules ignored), outrigger/protocol.py:218-241
+(argument check), outrigger/protocol.py:255-301 (the simpler built-in check),
+outrigger/protocol.py:170-173 (refused without the library), outrigger/ws.py:185-202
+(reading messages), outrigger/ws.py:259 (chat id pattern), outrigger/tokens.py:33-34
+(token and user patterns)
+
+## Notebook: who may edit which note
+
+*How note folders are shared, and how that sharing is checked.*
+
+**What happens:** you list note folders in the settings. You (the owner) can open any
+of them. A paired user can open only the folders you list for them in
+`notebook_roots_for` (none by default). Only `.md` files can be opened; paths that
+climb out of a folder (`..`), hidden files and links pointing outside are refused.
+
+The folder check runs **on every edit**, not just when the note is opened. If you
+take a folder away from someone, their next edit is refused, even with the note still
+open on their screen. There are also limits: 64 open notes in total, 16 per device.
+
+When someone types a `//` command, the note is locked, Hermes takes a turn, and during
+that turn Hermes may read and edit **only that note**.
+
+**How to read this diagram:** the top half is an app opening and editing a note. The
+bottom branch is a `//` command, including what happens if you narrow someone's access
+while Hermes is still working on their command.
 
 ```mermaid
 flowchart TD
-  Req["request"] --> Tok{"presented key starts otr_?"}
-  Tok -->|yes| Ver{"tokens.verify ok?"}
-  Ver -->|no| R401["401 bad/revoked token"]
-  Ver -->|yes| RemT{"local OR allow_remote (default false)?"}
-  RemT -->|no| R403t["403 remote token refused"]
-  RemT -->|yes| Token["admit token principal"]
-  Tok -->|no| Key{"_expected_key non-empty?<br/>auth_token > adapter key > env"}
-  Key -->|no| Loc1{"local? (loopback AND no PROXY_HEADERS)"}
-  Loc1 -->|no| R403r["403 remote keyless refused"]
-  Loc1 -->|yes| AKL{"allow_keyless_local (default true)?"}
-  AKL -->|no| R403k["403 keyless refused (loud)"]
-  AKL -->|yes| Owner1["admit OWNER + WARNING<br/>(heuristic; header-less relay can defeat)"]
-  Key -->|yes| Loc2{"local OR (allow_remote AND owner_key_remote)?"}
-  Loc2 -->|no| R403key["403 remote API key refused"]
-  Loc2 -->|yes| Cmp{"hmac.compare_digest(presented, key)?"}
-  Cmp -->|no| R401k["401 bad/missing key"]
-  Cmp -->|yes| Owner2["admit OWNER"]
-```
-
-`local` is the heuristic `_is_local` (`outrigger/auth.py:82-86`): loopback peer AND
-none of `PROXY_HEADERS` (`outrigger/auth.py:78-79`). It is **not** verified local
-peer identity — a header-less same-host relay (`ssh -L`, `socat`, bare
-`proxy_pass`) looks local. See the residual section below.
-
-### (e) Notebook grant recheck + decided in-flight window
-
-```mermaid
-flowchart TD
-  Open["doc.open"] --> Allow{"root in allowed_roots(client)?<br/>(notebook_roots_for grant)"}
-  Allow -->|no| NoRoot["no_root / not_allowed"]
-  Allow -->|yes| Resolve["resolve path + canonical identity<br/>caps / eviction (notebook.py:228-276)"]
-  Resolve --> Held["Doc held by client"]
-  Held --> Op["client op: update / undo / command"]
-  Op --> Get{"get(): client holds doc AND<br/>resolved location still under a granted root?"}
-  Get -->|no| NotAllowed["not_allowed (write revoked)"]
-  Get -->|yes| Proceed["lock / version checks -> write"]
-  Op -->|doc.command| Start["start_command locks note<br/>-> platform.inbound // turn"]
-  Start --> Mid{"grants narrowed mid-turn?"}
-  Mid -->|yes| Window["client writes via get() refused;<br/>in-flight notebook_read/edit (doc_for_tool,<br/>authorized at start) continue to end_command<br/>(DECIDED behavior, owner 19 Nov 2026)"]
-  Mid -->|no| Run["turn runs"]
-  Window --> End["end_command (turn end / lock timeout)<br/>-> unlock -> doc_for_tool no_command"]
+  Open[An app opens a note] --> Allow{Is the folder shared with this user?}
+  Allow -- no --> NoRoot[Refused]
+  Allow -- yes --> Resolve[Find the real file and apply the open-note limits]
+  Resolve --> Held[Note is open in the app]
+  Held --> Op[The app edits, undoes, or sends a // command]
+  Op --> Get{Is the folder still shared with this user?}
+  Get -- no --> NotAllowed[Refused: access has been taken away]
+  Get -- yes --> Proceed[Lock and version checks, then saved]
+  Op -- // command --> Start[Note locked, Hermes takes a turn]
+  Start --> Mid{Did you narrow this user's folders during the turn?}
+  Mid -- yes --> Window[The app's own edits are refused at once. Hermes finishes the command it already started]
+  Mid -- no --> Run[Turn runs]
+  Window --> End[Turn ends, the lock is released, Hermes's access to the note ends]
   Run --> End
 ```
 
-The in-flight window is **decided behavior, not an open question**: a mid-turn
-narrowing does not abort the running `//` command (authorized at start via
-`get()`); its `notebook_read`/`notebook_edit` calls keep working until
-`end_command`. Client-initiated writes are revoked immediately. Pinned by
-`tests/test_notebook_grants.py::test_inflight_command_completes_after_midturn_narrowing`
-(ledger F-05 close-out). Residual: a narrowed user still receives `doc.changed`
-broadcasts on a held-open doc until close/disconnect (`broadcast` does not
-re-check grants, `outrigger/notebook.py:407-430`).
+**What could go wrong:** you remove someone's folder mid-command and expect Hermes to
+stop working on it at once. **What protects you, and what doesn't:** the user's own
+edits stop immediately. Hermes's work on a command that already started was
+authorised when it started, and **continues until the turn ends**. This is a
+deliberate decision (owner, 19 Nov 2026), pinned by a test so it can't change
+silently.
+
+**What's left:**
+
+- The in-flight command finishes, as above.
+- A user whose access was removed still receives change notifications for a note they
+  still have open, until they close it.
+- Two hard links to the same file are treated as two separate notes.
+- Hermes reads a cached copy of the note; edits re-read the file first, so nothing is
+  overwritten. A deleted note can be re-created from that cache if Hermes edits it.
+- The note's text goes to Hermes labelled untrusted, but Hermes still reads it, so a
+  collaborator can try to steer Hermes through what they write.
+
+Code: outrigger/notebook.py:70-84 (shared folders), outrigger/notebook.py:101-120
+(path checks), outrigger/notebook.py:304-321 (re-checked on every edit),
+outrigger/notebook.py:231-279 (opening and limits), outrigger/notebook.py:221-228 (making room
+by closing idle notes), outrigger/notebook.py:340-356 (lock and version checks on edits), outrigger/notebook_tools.py:21-41
+(Hermes may touch only the note being worked on), outrigger/notebook_tools.py:72-137
+(Hermes's read and edit), outrigger/notebook.py:454-514 (// commands),
+outrigger/notebook.py:489-499 (note text labelled untrusted), outrigger/notebook_tools.py:87
+(read results labelled untrusted), outrigger/notebook.py:410-433 (change
+notifications), outrigger/notebook.py:324-337 (deleted-note handling),
+outrigger/ws.py:311-403 (note messages)
+
+## Chat separation and admin tools
+
+*How paired users' chats are kept apart from yours and from each other, and which
+tools their chats get.*
+
+**What happens:**
+
+- **Separate chats.** Each paired token's chats are named with the token's id, so one
+  user can't open another's. The shared "home" chat (where scheduled results arrive)
+  is yours only. Stopping a chat or answering a prompt requires owning that chat.
+- **Limited tools.** Your chats get every Hermes tool. A paired user's chats get only
+  `user_toolsets` (web and Outrigger tools, no terminal or files), unless their token
+  is marked admin. Slash commands are limited to a short list you can change (`user_allowed_commands`).
+- **Rate limits.** Paired non-admin users can send 20 chat messages or commands per
+  minute.
+- **Session binding** (attaching to an existing Hermes session) is owner only.
+
+**What could go wrong:** a user has two tokens, one admin and one not. The gateway
+identifies chats by *user*, never by *token*, so it can't tell which token a chat came
+from.
+
+**What protects you:** if any non-admin connection of that user is live, all their
+chats are narrowed (the conservative choice). If the list of connections can't be read
+reliably at that moment, tools are narrowed too.
+
+**What's left:** with no live connection (a scheduled job, for example), the user's
+admin status decides. The very first `//` command in a brand-new chat can run with the
+user's admin status before narrowing catches up. Giving an existing admin user an
+extra non-admin token is silent. Fixing these needs a change to Hermes's gateway.
+
+Code: outrigger/platform.py:80-95 (chat naming and home), outrigger/platform.py:177-181
+(chat ownership), outrigger/platform.py:321-326 (prompt answers), outrigger/ws.py:282-295
+(chat actions), outrigger/platform.py:131-164 (which tools a user gets),
+outrigger/platform.py:117-128 (admin list), outrigger/platform.py:152-158 (narrowed if
+uncertain), outrigger/platform.py:407-438 (chats arriving, and the first-command
+case), outrigger/auth.py:169-174 (who counts as a limited user),
+outrigger/ws.py:48-66 (rate limit), outrigger/ws.py:428-435 (session binding
+is owner only), outrigger/ws.py:236-237 (paired devices get no session)
+
+## Helper agents
+
+*Whether agents that Hermes starts in the background can use your devices.*
+
+**What happens:** when Hermes starts a helper (a *subagent*), Outrigger marks that
+helper's session. Marked sessions get no devices and no note tools while
+`allow_subagents` is off (the default). Turning it on allows device calls, but helpers
+still can't touch notes.
+
+**What could go wrong:** very many helpers mark very many sessions. **What protects
+you:** marks are never thrown away early, so a helper never quietly regains access.
+Past 1,024 tracked helpers, each new mark logs a warning; that is a warning level,
+not a limit. A mark that is never cleared costs memory, not access.
+
+Code: outrigger/registry.py:147-185 (marking), outrigger/registry.py:215-239 (marked
+sessions get no devices), outrigger/__init__.py:84-95 (where helpers are noticed),
+outrigger/dispatch.py:49-50 and outrigger/dispatch.py:74-76 (relay refuses them),
+outrigger/notebook_tools.py:36-37 (notes refuse them)
+
+## Audit trail
+
+*What gets recorded, and what doesn't.*
+
+**What happens:** every tool request's outcome is written to `audit.jsonl`: which
+tool, which user, and whether it succeeded, failed or was refused. Arguments are only
+recorded if `audit_args` is on. Requests refused before a device was chosen are
+recorded without a user.
+
+**What could go wrong, and what protects you:** if the file can't be written (disk
+full, permissions), the tool call still completes and the loss is logged as an error
+with the details, and counted.
+
+**What's left:**
+
+- **Notes and chats aren't in the audit file.**
+- **No tamper-evidence.** Someone who can edit the file can change history without
+  trace, and the file grows without limit. The file is created readable only by you,
+  but an older file keeps whatever permissions it had.
+- **Finding H-01:** if saving a screenshot-style capture fails, the error skips that
+  call's audit record. The call fails loudly in the log, but the outcome isn't in the
+  audit file. A fix is open in PR #4.
+
+Code: outrigger/audit.py:39-85 (writing records), outrigger/audit.py:76-85 (write
+failures), outrigger/audit.py:29 (failure counter), outrigger/audit.py:95-134 (saving
+captures, finding H-01), outrigger/dispatch.py:167-169 (where records are written)
+
+## When things fail
+
+*What Outrigger does when part of it breaks: refuse, warn, or carry on.*
+
+| If this fails | It logs | It refuses | It carries on with |
+|---------------|---------|------------|--------------------|
+| Writing the audit file | An error with the details, and counts it | Nothing; that record is lost | The tool call |
+| The note watcher crashes | An error, then restarts it | Nothing | Watching notes |
+| The `jsonschema` library is missing | An error | All tool schemas | A simpler argument check |
+| Arguments too large to review | A warning | A partial review | Asking the human |
+| The reviewer errors | A warning | Nothing | Asking the human |
+| Over 1,024 helper marks | A warning per mark | Nothing | Keeping every helper blocked |
+| A setting can't be read | A warning naming it | That value | The default |
+| A local connection with no key | A loud warning | Nothing (keyless local access is on by default) | Letting it in as owner |
+| Same, with keyless local access off | A warning with the fix | That connection | Token and key sign-ins as normal |
+| The connection list can't be read for admin tools | A warning | Full tools | Limited tools |
+| A note's lock can't expire | A warning | That note stays locked | Other notes |
+| Hermes's edit can't re-read the note | A refusal message | The edit (nothing is overwritten) | The note as it was |
+| The note lock time setting is invalid | A warning | Nothing | 600 seconds |
+
+Code: outrigger/notebook.py:599-624 and outrigger/notebook.py:571-596 (watcher
+restart), outrigger/notebook.py:543-556 (lock expiry), outrigger/notebook_tools.py:121-124
+(edit can't re-read), outrigger/notebook.py:532-540 (lock time setting)
 
 ## Security-sensitive units
 
-Module-per-concern **after the cohesion restructure** (step 2). Each security
-concern is a named unit an auditor can jump straight to; function names + line
-ranges are current. The auth surface moved to `auth.py`, the notebook tool
-surface to `notebook_tools.py`, and the capture writer into `audit.py`; the
-remaining interleaving in the large modules is bannered and noted below.
+*Where each security job lives in the code, for anyone reviewing or changing it.*
+Every module listed carries a `# Audit: see AUDIT.md#security-sensitive-units`
+comment pointing here. Changing one of these means updating this guide in the same
+change (see AGENTS.md).
 
-| Concern | Where it lives (function : lines) |
-|---------|-----------------------------------|
-| Authentication (authn) | `outrigger/auth.py`: `_expected_key` 33-48, `_presented_key` 51-63, `_is_loopback` 66-73, `PROXY_HEADERS` 78-79, `_is_local` 82-86, `_peer` 89-98, `OWNER` 101, `authenticate` 104-123, `authorize` 126-163. `outrigger/tokens.py`: `verify` 132-152, `is_active` 155-161. (`ws.py` re-exports every auth name.) |
-| Authorization / grants (authz) | `outrigger/notebook.py`: `allowed_roots` 69-81, `resolve` 98-117, `open_doc` 228-276, `get` 301-318. `outrigger/notebook_tools.py`: `doc_for_tool` 21-41. `outrigger/platform.py`: `toolsets_for_user` 131-164, `access_extra` 117-128, `_prefix` 80-84, `chat_key` 87-95, `owns` 177-181. `outrigger/registry.py`: `for_session` 215-239, `add` caps 93-119. `outrigger/auth.py`: `_limited` 166-171. `outrigger/ws.py`: owner-only `bind` 427-434. |
-| Input validation | `outrigger/protocol.py`: `ToolDecl.parse` 48-80, `parse_tools` 83-97, `check_schema` 140-178, `_remote_ref` 122-137, `_local_only_registry` 185-201, `_validator_cls` 204-215, `validate_args` 218-241, `_type_ok` 255-267, `_minimal_validate` 270-301, `int_field`/`str_field`/`one_line`/`sanitize_text` 307-342. `outrigger/ws.py`: `_decode` 184-201, `_CHAT_ID_RE` 258. `outrigger/notebook.py`: `resolve` 98-117. `outrigger/notebook_tools.py`: `apply_edits` 91-107. |
-| Audit | `outrigger/audit.py`: `record` 39-85, `_write_failures` 29, `_save_capture` 95-134 (capture artifacts). `outrigger/dispatch.py`: `reject` 109-116 + audit sites 152-155, 164-166. (Notebook edits and platform chat are **outside** audit.jsonl scope — no audit calls in `notebook.py`/`platform.py`.) |
-| Approval / review | `outrigger/reviewer.py`: `configure` 88-108, `enabled` 111-114, `review` 117-184, budgets/defang 37-47. `outrigger/dispatch.py`: review gate + block 141-158. |
-| Credentials | `outrigger/tokens.py`: `path` 37-41, `_load` 44-62, `_save` 65-76, `mint` 83-108, `revoke` 111-123, `active_users` 164-170. `outrigger/cli.py`: `setup` 14-25, `handle` 28-63. |
-| Subagent gate | `outrigger/registry.py`: `mark_subagent` 147-173, `unmark_subagent` 175-179, `is_subagent` 181-185, `for_session` subagent branch 227-229, `rotate` guard 208-209. `outrigger/__init__.py`: hooks 84-95. `outrigger/dispatch.py`: 46-47, 71-73. `outrigger/notebook_tools.py`: 36-37. |
-| Trust settings | `outrigger/settings.py`: `_as_bool` 23-41, `DEFAULTS` 43-85, `load` 90-99, `get` 102-105. `outrigger/plugin.yaml`: `config_schema` 10-38. |
-| Relay / capture / result bounding | `outrigger/dispatch.py`: `_run` 170-227, `_format_ok` 230-243. `outrigger/audit.py`: `_save_capture` 95-134. `outrigger/ws.py`: result ingress 439-457. |
-| Collaboration machinery (notebook) | `outrigger/notebook.py`: `broadcast` 407-430, watcher `_watch`/`_watch_done`/`ensure_watcher` 568-621, snapshots/undo 363-387, locks/commands 451-553. `outrigger/notebook_tools.py`: tool handlers `tool_read`/`tool_edit` 72-137. |
+| Job | What it does | Where |
+|-----|--------------|-------|
+| Sign-in | Decides who is connecting | outrigger/auth.py:105-166; tokens: outrigger/tokens.py:135-164 |
+| Access to notes, chats and tools | Decides what a user may touch | outrigger/notebook.py:70-84, outrigger/notebook.py:304-321, outrigger/notebook_tools.py:21-41, outrigger/platform.py:131-164, outrigger/platform.py:80-95, outrigger/registry.py:93-119 (device limits), outrigger/auth.py:169-174 (who counts as a limited user) |
+| Input checks | Rejects malformed or hostile messages | outrigger/protocol.py:48-80, outrigger/protocol.py:140-178, outrigger/protocol.py:218-241, outrigger/protocol.py:307-342 (text field cleaning), outrigger/ws.py:185-202, outrigger/notebook_tools.py:91-107 (applying edits) |
+| Audit | Records what happened | outrigger/audit.py:39-85, outrigger/dispatch.py:112-119 (refusals), outrigger/dispatch.py:155-158 |
+| Review | Gives the AI reviewer's opinion | outrigger/reviewer.py:88-108 (setup), outrigger/reviewer.py:117-184 |
+| Tokens | Makes, stores and revokes credentials | outrigger/tokens.py:37-41 (file location), outrigger/tokens.py:86-126, outrigger/tokens.py:167-173 (active users), outrigger/cli.py:14-25 |
+| Helper agents | Keeps helpers away from devices and notes | outrigger/registry.py:147-185, outrigger/registry.py:208-209, outrigger/registry.py:227-229 |
+| Settings | Reads the trust switches | outrigger/settings.py:23-41, outrigger/settings.py:102-105, outrigger/plugin.yaml:10-38 (settings descriptions) |
+| Relay and result limits | Passes requests on and caps results | outrigger/dispatch.py:173-230, outrigger/dispatch.py:233-246, outrigger/ws.py:440-458 |
+| Shared notes | Notifications, file watching, undo, locks | outrigger/notebook.py:410-433, outrigger/notebook.py:571-624, outrigger/notebook.py:366-390, outrigger/notebook.py:454-556 |
 
-**Interleaving (what remains bannered inside the large modules):**
-- `outrigger/auth.py` (171 lines) is now the cohesive **authn** unit; `ws.py`
-  re-exports its names. `outrigger/ws.py` (481 lines) keeps **connection
-  lifecycle** (`ws_handler` 90-179), **message routing** (`_handle` 415-481,
-  `_handle_chat` 263-305, `_handle_doc` 310-402), **rate limiting**
-  (`_rate_check` 47-65) and **ingress result bounding** (439-457) — bannered.
-- `outrigger/notebook.py` (636 lines) keeps **access control**
-  (`allowed_roots`/`resolve`/`get`), **storage** (`_read`/`_write`),
-  **collaboration** (broadcast, watcher, snapshots) and **locks/commands** —
-  bannered. The **Hermes tool handlers** moved to `outrigger/notebook_tools.py`
-  (138 lines), which reaches all shared state as `notebook.<name>`; `notebook.py`
-  re-exports them lazily (one-way dependency).
-- `outrigger/dispatch.py` (269 lines) keeps **relay** (`_run`), **audit
-  recording** (`reject` + record sites) and **client selection / subagent gate**
-  (`_pick_client`, `platform_chat_clients`); **capture** (`_save_capture`) moved
-  to `audit.py` (dispatch re-exports it for callers/tests).
-- `outrigger/platform.py` (515 lines) keeps **admin-scope authz**
-  (`toolsets_for_user`/`access_extra`, bannered) alongside the **messaging
-  adapter** (receive, send, prompt cards, media). The authz pair was NOT extracted
-  to a separate module: `toolsets_for_user` reads the live chat registry `CHATS`,
-  so it is entangled with platform chat state (moving it buys no cohesion).
-- `outrigger/registry.py` (309 lines) keeps **membership/caps**, the **subagent
-  gate** (bannered, named in the docstring as a security surface) and **per-turn
-  bookkeeping** — the gate stays because it is small and state-entangled with
-  `REGISTRY`.
+**Large modules that still hold more than one job** (each section marked with a
+banner comment in the code):
 
-## Invariants & failure contracts
+- `outrigger/ws.py` holds the connection lifecycle (outrigger/ws.py:91-180), message
+  routing (outrigger/ws.py:416-482, outrigger/ws.py:264-306), the rate limit
+  (outrigger/ws.py:48-66) and incoming result limits. Its sign-in names are re-exported
+  from `auth.py`.
+- `outrigger/notebook.py` holds access checks, file storage, collaboration and
+  locks. Hermes's note tools moved out to `notebook_tools.py`.
+- `outrigger/dispatch.py` holds the relay, audit recording and device selection;
+  capture saving moved to `audit.py`.
+- `outrigger/platform.py` keeps the admin-tool decision next to the chat code,
+  because that decision reads the live chat list directly; separating it wouldn't
+  make it easier to review.
+- `outrigger/registry.py` keeps the helper-agent gate next to the device list it
+  depends on.
 
-Fail-loud / fail-closed inventory: what is logged, what is refused, what
-continues. Residual limits are stated honestly (from
-`docs/security-review/auth-trust-boundary.md` + the ledger).
+## Residual risks
 
-| Failure point | Logged | Refused | Continues | Anchor |
-|---------------|--------|---------|-----------|--------|
-| Audit write loss (OSError) | ERROR with path, reason, tool/session/outcome; `_write_failures` counter incremented under lock | nothing — the entry is lost | the tool call (auditing never breaks a call, but loss is observable) | `outrigger/audit.py:76-85`, `outrigger/audit.py:29` |
-| Watcher task death | ERROR + restart (`_watch_done`); cancelled → WARNING | — | watcher restarted without waiting for a doc.open; per-tick/per-doc/per-client guards keep it alive through bad writes | `outrigger/notebook.py:596-621`, `outrigger/notebook.py:568-593` |
-| Schema validation unavailable (jsonschema ImportError) | ERROR at `check_schema` | tool schema declarations refused (fail closed); `validate_args` falls back to `_minimal_validate` (still refuses non-local refs) | — | `outrigger/protocol.py:170-173`, `outrigger/protocol.py:218-233` |
-| Reviewer over-budget / unserializable args | WARNING "ESCALATE (fail closed)" | a silent approve on a truncated prefix is avoided | forced `escalate` before any model call; the user is asked | `outrigger/reviewer.py:132-142` |
-| Reviewer failure / unclear verdict | WARNING on exception | — | `escalate` (advisory) | `outrigger/reviewer.py:179-183` |
-| Subagent mark cap reached | WARNING per overflow mark (not throttled) | nothing — marks never evicted, never refused | every marked session stays denied while `allow_subagents=false`; missed `subagent_stop` leaks memory, not authority | `outrigger/registry.py:147-173` |
-| Settings bool unrecognized | WARNING naming key/value/default | the bad value is not used | declared default applied (fail closed for refusal switches) | `outrigger/settings.py:23-41` |
-| Keyless-local-owner admission | WARNING naming peer, heuristic limit, remedies | — | owner admitted on the locality heuristic (default `allow_keyless_local=true`) | `outrigger/auth.py:146-152` |
-| Keyless attach with `allow_keyless_local=false` | WARNING | 403 every credential-less owner attach | paired-token / keyed auth untouched | `outrigger/auth.py:142-145` |
-| Chat-registry scan raced (admin scope) | WARNING "restricting toolsets" | full toolsets withheld | restricted toolsets (fail closed) | `outrigger/platform.py:152-158` |
-| Notebook lock expiry fails on a doc | WARNING | that doc stays locked (fail closed) | other docs still expire | `outrigger/notebook.py:540-553` |
-| `tool_edit` disk refresh fails | JSON refusal `unreadable` | the write (no clobber) | the note is preserved | `outrigger/notebook_tools.py:121-124` |
-| Bad `notebook_lock_timeout_s` config | WARNING | — | default 600 s used | `outrigger/notebook.py:529-537` |
+Everything left over, ranked by how much it matters. Start here when deciding what to
+fix next.
 
-### Residual limits (honest — mitigated, not "fixed")
+| Rank | Risk | Why it matters | Mitigation available now |
+|------|------|----------------|--------------------------|
+| 1 | **F-10: owner access with no credential when no key exists** (on by default), and "local" can be faked by a relay on the same machine | Full owner control, including terminal tools, for whoever reaches it | Configure a key, or set `allow_keyless_local` off. The full fix (a local socket) is outside this design |
+| 2 | The AI reviewer only advises by default | A harmful request reaches the device; the device app's prompt is the real gate | Set `review_deny` to `block`; use device apps that confirm |
+| 3 | Note text is labelled, not isolated | A collaborator can try to steer Hermes through what they write | Share folders only with people you trust |
+| 4 | **F-10: admin status is per user, not per token** | Edge cases where a user's chat runs with admin tools | Don't mix admin and non-admin tokens for one user |
+| 5 | "Remote" settings rely on the same locality guess | A relay may count as local | Use proxies that add proxy headers |
+| 6 | Gateways that don't share their key | Outrigger may believe no key exists | Set the plugin's own `auth_token` |
+| 7 | **F-05: a running `//` command outlives a narrowed grant** | Hermes finishes editing a note after you removed access | Decided behaviour; wait for the turn to end |
+| 8 | **H-01: a failed capture save skips its audit record** | One outcome missing from the audit file | Fix open in PR #4 |
+| 9 | Audit file not tamper-evident, unbounded, excludes notes and chats | History can be edited; the file grows | Back it up; watch its size |
+| 10 | About 20 seconds of access after revoking a token | A lost device stays connected briefly | Deliberate; new connections are refused at once |
+| 11 | Narrowed users still get change notices on open notes | They see edits until they close the note | Ask them to close it, or disconnect them |
+| 12 | **H-02: a wrongly shaped token file raises an error** | Nobody can connect until it's fixed (no one gets in wrongly) | Fix open in PR #4 |
+| 13 | Cached note reads; deleted notes can return | Confusing, not a leak | Re-open the note |
 
-- **Locality heuristic (F-10 / e75c7051, OPEN fundamental limit).** Over TCP
-  there is no in-process signal distinguishing a header-less relay from a genuine
-  local process; `_is_local` (`outrigger/auth.py:82-86`) is loopback + header
-  absence, not verified peer identity. With no key anywhere and
-  `allow_keyless_local=true`, a header-less relayed peer is admitted as OWNER
-  (now loud). `allow_remote`/`owner_key_remote` also ride the heuristic. The
-  architectural fix (Unix socket / `SO_PEERCRED`, or a trusted-proxy allowlist)
-  is out of scope. Operator controls: configure a key, set
-  `allow_keyless_local=false`, use header-injecting proxies.
-  (`docs/security-review/auth-trust-boundary.md` §3.)
-- **Key-source fallback (F-10 / 76d74ef9, conditional residual).** The
-  adapter-key fix closes the keyless route on gateways exposing
-  `app['api_server_adapter']` (both installed variants). Gateways without that
-  hook fall back to the plugin-setting + env view; the plugin has no signal to
-  distinguish "gateway keyless" from "gateway key invisible" and keeps loud keyless local
-  trust. (`outrigger/auth.py:33-48`; auth-trust-boundary.md §1.)
-- **Per-token admin API gap (F-10 / ed211e05, residual).** The gateway identifies
-  callers by `user_id`, never the token. Live-connection narrowing therefore:
-  mixed admin+non-admin connections narrow **both** (fail closed); connectionless
-  turns (cron/outbox) use the per-user admin flag; the first-ever `doc.command`
-  on a fresh chat syncs the admin list before `attach`, so `allow_admin_from` can
-  include the user for that one message (`outrigger/platform.py:420-430`);
-  minting a non-admin token for an already-admin user is silent. True per-token
-  admin needs a gateway API change. (auth-trust-boundary.md §2.)
-- **F-05 decided in-flight window.** Mid-turn grant narrowing does not abort the
-  running `//` command; its notebook tool calls continue to `end_command`
-  (authorized at start). Client writes are revoked immediately. Decided behavior
-  (owner, 19 Nov 2026), pinned by a preservation test. Also: hardlink aliases are
-  not coalesced (distinct realpaths, same inode); a narrowed user still receives
-  `doc.changed` broadcasts on a held-open doc until close.
-  (`outrigger/notebook_tools.py:21-41`, `outrigger/notebook.py:407-430`; ledger F-05.)
-- **Audit rotation / hash-chain not implemented.** `audit.jsonl` grows unbounded;
-  there is no size cap and no hash-chain/signature, so offline edits are
-  undetectable. 0600 is creation-only (pre-existing artifacts keep their mode).
-  Notebook edits and platform chat are outside the audit trail.
-  (`outrigger/audit.py:39-85`; ledger F-09 residuals.)
-- **~20 s revocation latency.** Live token connections close on the keepalive
-  check (`PING_INTERVAL=20`, `outrigger/ws.py:35`, `outrigger/ws.py:106-115`);
-  this is a documented design choice. New handshakes and the next `receive`
-  re-sync immediately.
-- **Notebook cached reads / deleted-note semantics (F-04 residuals).**
-  `tool_read` serves cached text (clobbering is avoided by `tool_edit`'s disk
-  refresh, not by reads); `_check_disk` returns False on a stat OSError, so a
-  deleted note is recreated from cache on edit.
-  (`outrigger/notebook_tools.py:72-88`, `outrigger/notebook.py:321-334`.)
-- **Browser boundary is the gateway's.** The plugin performs no Origin check;
-  the installed gateway's CORS middleware default-denies unlisted browser
-  Origins. Do not set `cors_origins: '*'` on a keyless deployment.
-  (auth-trust-boundary.md §3; ledger rejected CSWSH finding.)
-- **Capture-write errors escape the audit trail (claims-pass finding; hardening
-  follow-up, owner decision).** `_save_capture` (`outrigger/audit.py:95-134`)
-  does mkdir/open/write/prune without a guard: an OSError (disk full,
-  permissions) propagates through `_format_ok`/`_run` and skips that call's
-  `audit.record`. The call fails loud (the ws handler's exception guard logs
-  ERROR), but the outcome is not in audit.jsonl. A guarded capture write (returning an
-  image_error field so the call completes audited) is a functional change —
-  logged for the next remediation pass, not done in this refactor.
-- **Non-dict token-store JSON raises (claims-pass finding; hardening follow-up).**
-  `tokens._load` (`outrigger/tokens.py:44-62`) handles unreadable/dict-shaped
-  corrupt JSON as an empty store, but a non-dict top-level JSON value raises
-  AttributeError before the shape check. Still fail closed (the handshake
-  errors out; no token verifies) and loud; routing it through the empty-store
-  path is a one-line hardening for the next remediation pass.
+Details for the F-numbered items are in `docs/security-review/auth-trust-boundary.md`
+and `docs/security-review/remediation.md`.
+
+## Glossary
+
+- **Gateway:** the Hermes server program that Outrigger plugs into.
+- **Client / device app:** the sidebar, phone app or add-in that connects to
+  Outrigger.
+- **Client tool:** something Hermes can ask a connected device to do; it runs on the
+  device.
+- **Owner:** you, the person whose API key it is. Full control.
+- **Paired token:** a limited, revocable credential (`otr_…`) for one user.
+- **Admin token:** a paired token whose chats get the full tool set.
+- **WebSocket:** a live, two-way connection between a device and the gateway.
+- **Locality heuristic:** Outrigger's guess that a connection is "local": it came from
+  the same machine and carries no proxy headers.
+- **Relay / reverse proxy:** a program that forwards network traffic, so a remote
+  connection appears to come from the local machine.
+- **Prompt injection:** text written to trick an AI into doing something, hidden in a
+  page or note.
+- **Reviewer:** an AI that gives an opinion (approve, deny, escalate) on each tool
+  request that isn't automatic.
+- **Schema:** the description of what arguments a tool accepts.
+- **Subagent (helper agent):** a background agent Hermes starts to work on part of a
+  task.
+- **Hash:** a scrambled fingerprint of a token; the token can be checked against it,
+  but not recovered from it.
+- **Audit trail:** the `audit.jsonl` file recording each tool request's outcome.
+
+## How this guide stays accurate
+
+- **CI checks it on every change** (`docs-audit`): every `file:line` reference must
+  point at real code, every diagram must render, every security-related module must
+  point back here, and wording that overstates protection is rejected.
+- **Tests** pin the behaviour described here, including the decided F-05 in-flight
+  behaviour (`tests/test_notebook_grants.py`) and that each module keeps its pointer
+  (`tests/test_cohesion.py`).
+- **Limits:** these checks confirm that references are still valid. Whether each
+  sentence here is true is checked by reviewing the claims against the code.
