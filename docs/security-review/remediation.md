@@ -31,7 +31,7 @@ lines), commits the fix, then the ledger entry, then dispatches the next.
 | F-04 | Notebook watcher silent exception (245216c2) + `tool_edit` no disk refresh (b26e85aa) | Low + Low | notebook.py | **fixed (ec569df)** |
 | F-05 | Notebook stale root grants (4ea8d7ce) + doc-identity aliasing (539075fd) | Low + Low | notebook.py | **fixed (7c4608c)** |
 | F-06 | Notebook shared-root indirect injection labeling (39fe8161) | Low | notebook.py | **fixed (43c5d82)** |
-| F-07 | Unbounded 4 MB error relay (0bf92726) | Low | dispatch.py, ws.py | pending |
+| F-07 | Unbounded 4 MB error relay (0bf92726) | Low | dispatch.py, ws.py | **fixed (48c0983)** |
 | F-08 | Subagent marker eviction fail-open (9c9370fa) | Low | registry.py, __init__.py | pending |
 | F-09 | Audit silent loss + identity + tamper (f37f9e4d) + artifact permissions (2eaf3124) + malformed-request unrecorded (6af3ae03) | Inconclusive→fix + Info | audit.py, dispatch.py, notebook.py, ws.py | pending |
 | F-10 | Auth locality fail-open (e75c7051) + credential-source mismatch (76d74ef9) + admin-scope mismatch (ed211e05) | Inconclusive→mitigate+residual | ws.py, platform.py, settings.py, docs | pending |
@@ -210,3 +210,25 @@ and duplicate merges.
 - **RED evidence:** new file first run 4 failed / 1 passed (the 1 is the
   preservation guard); schema/command_message/tool_read labeling tests failed
   for the right reason (the // flow itself passed).
+
+### F-07 — Unbounded error relay — FIXED (48c0983)
+- **Delegation:** one subagent, TDD (real aiohttp ws end-to-end + _run direct).
+- **Fix:** `_run` coerces non-string errors (json.dumps), strips control chars
+  and caps outrigger_-prefixed strings AND non-string values with the ok path's
+  bound `min(decl.max_result_chars, settings.max_result_chars)`; message carrier
+  bounded; short gateway codes pass through unchanged (outrigger_cancelled keeps
+  cancelled status; a long forgery maps to error). ws result handler coerces
+  non-string errors and bounds the error field at ingress (defense in depth).
+- **Accepted deviations:** error cap mirrors ok path min(decl, settings);
+  ingress coercion turns falsy non-string errors (0/False/[]/{}) into short JSON
+  strings riding the 2000-char detail path (bounded; no test depended on the old
+  behavior); ws._decode already rejects lone surrogates at ingress.
+- **Parent verification (independent):** full diff read; suite re-run
+  **256 passed, 1 skipped** (239 + 17 new, zero regressions); parent probe
+  `cache/scratch/verify_error_relay_parent.py` — **13 assertions pass**:
+  oversized/dict/list errors capped, control chars stripped, short codes +
+  cancelled status intact, forged long cancelled → error, ok path unchanged,
+  decl cap + message carrier bounded; static greps clean.
+- **RED evidence:** new file first run 8 failed / 9 passed (the 9 are
+  preservation guards); cap/coercion/control-char/ingress tests failed for the
+  right reason.
