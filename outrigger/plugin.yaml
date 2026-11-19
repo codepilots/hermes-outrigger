@@ -1,5 +1,5 @@
 name: outrigger
-version: 0.1.0
+version: 0.2.0
 manifest_version: 2
 description: Let a thin client attach to a Hermes session and offer tools that run on the client.
 author: Autumn Thomson
@@ -15,7 +15,8 @@ config_schema:
   max_clients_per_token: {type: int, default: 4, description: "Connections one paired token may hold at once"}
   user_messages_per_min: {type: int, default: 20, description: "Chat messages and // commands per minute for a paired non-admin user"}
   max_chat_chars: {type: int, default: 100000, description: "Longest chat message accepted"}
-  auth_token: {type: secret, default: "", description: "Bearer token for clients; falls back to API_SERVER_KEY"}
+  auth_token: {type: secret, default: "", description: "Bearer token for clients; falls back to the gateway's resolved API key (platform config/secret, then API_SERVER_KEY env). See docs/security-review/auth-trust-boundary.md"}
+  allow_keyless_local: {type: bool, default: true, description: "Allow a credential-less loopback client to attach as owner (local dev). Set false on a shared host to refuse every keyless owner attach. A header-less relay can still look local — see docs/security-review/auth-trust-boundary.md"}
   default_timeout_s: {type: int, default: 60, description: "Per-call timeout when the tool declares none"}
   max_timeout_s: {type: int, default: 400, description: "Cap on tool-declared timeouts (Hermes abandons calls at 420s)"}
   max_result_chars: {type: int, default: 20000, description: "Result size cap"}

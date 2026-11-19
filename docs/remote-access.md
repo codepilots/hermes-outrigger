@@ -31,10 +31,20 @@ through the tunnel counts as remote:
 
 | Who connects | From this machine | Remote (tunnel or proxy) |
 |---|---|---|
-| No key configured at all | allowed (local process) | refused, always |
+| No key configured at all | allowed if `allow_keyless_local` (default true) | refused, always |
 | `API_SERVER_KEY` | allowed | refused unless `allow_remote` **and** `owner_key_remote` |
 | Paired token (`otr_…`) | allowed | allowed if `allow_remote` |
 | Revoked or unknown token | refused (401) | refused (401) |
+
+> **Locality is a heuristic, not a proof.** "Local" means loopback **and** no
+> proxy headers. Cloudflare always adds headers, so everything through the tunnel
+> counts as remote — but a *header-less* same-host relay (`ssh -L`, `socat`, a
+> bare `proxy_pass`) looks local. With no key anywhere and `allow_keyless_local`
+> true, such a relay can attach as owner (now logged loudly). On a shared host
+> set `allow_keyless_local: false` or configure a key. The plugin also reads the
+> gateway's resolved key (config/secret), so a config-keyed gateway never falls
+> into keyless mode. Full residual model and deployment controls:
+> [security-review/auth-trust-boundary.md](security-review/auth-trust-boundary.md).
 
 ## Before you start
 

@@ -147,7 +147,8 @@ _RATE: dict[str, list[float]] = {}
 
 
 def _rate_check(client: Client) -> None:
-    """Per-user limit on messages that start Hermes turns (chat and // commands)."""
+    """Per-user limit on messages that start Hermes turns (chat and // commands)
+    and on notebook doc.list / doc.open (owner/admin exempt)."""
     if not _limited(client):
         return
     per_min = int(settings.get("user_messages_per_min") or 0)
