@@ -331,19 +331,27 @@ def _lock_info(doc: Doc) -> dict | None:
 
 
 def broadcast(doc: Doc, msg: dict, *, exclude=None) -> None:
-    """Send to every client with the note open; safe from the loop or a worker thread."""
+    """Send to every client with the note open; safe from the loop or a worker thread.
+    One unreachable client (e.g. a closed loop) is logged loud and skipped, never fatal."""
     for c in list(doc.clients):
         if c is exclude or c.closed:
             continue
-        coro = c.ws.send_json(msg)
+        coro = None
         try:
-            running = asyncio.get_running_loop()
-        except RuntimeError:
-            running = None
-        if running is c.loop:
-            running.create_task(coro)
-        else:
-            asyncio.run_coroutine_threadsafe(coro, c.loop)
+            coro = c.ws.send_json(msg)
+            try:
+                running = asyncio.get_running_loop()
+            except RuntimeError:
+                running = None
+            if running is not None and running is c.loop:
+                running.create_task(coro)
+            else:
+                asyncio.run_coroutine_threadsafe(coro, c.loop)
+        except Exception:
+            if coro is not None:
+                coro.close()
+            log.warning("outrigger notebook: broadcast to client %s failed; message dropped",
+                        getattr(c, "id", "?"), exc_info=True)
 
 
 # ---------------------------------------------------------------- // commands
@@ -429,11 +437,27 @@ def turn_ended(session_id: str) -> None:
             end_command(doc)
 
 
+def _lock_timeout_s() -> int:
+    """notebook_lock_timeout_s coerced to int; a null/bad value falls back to the default, loud."""
+    raw = settings.get("notebook_lock_timeout_s")
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        default = int(settings.DEFAULTS["notebook_lock_timeout_s"])
+        log.warning("outrigger notebook: bad notebook_lock_timeout_s %r; falling back to %ds", raw, default)
+        return default
+
+
 def expire_locks() -> None:
-    limit = int(settings.get("notebook_lock_timeout_s"))
+    limit = _lock_timeout_s()
     for doc in list(DOCS.values()):
         if doc.lock and time.time() - doc.lock["started"] > limit:
-            end_command(doc, notice=f"Hermes took longer than {limit // 60} min; editing resumed")
+            try:
+                end_command(doc, notice=f"Hermes took longer than {limit // 60} min; editing resumed")
+            except Exception:
+                # fail closed: the note stays locked; one bad doc must not starve the others
+                log.warning("outrigger notebook: failed to expire the lock on %s; it stays locked",
+                            doc.doc_id, exc_info=True)
 
 
 def _session_chat() -> str | None:
@@ -462,21 +486,49 @@ def doc_for_tool(session_id: str | None) -> Doc:
 async def _watch() -> None:
     while True:
         await asyncio.sleep(WATCH_INTERVAL)
-        expire_locks()
+        try:
+            expire_locks()
+        except Exception:
+            log.warning("outrigger notebook: watcher lock-expiry tick failed; continuing", exc_info=True)
         for doc in list(DOCS.values()):
             try:
                 with doc.mutex:
                     changed = _check_disk(doc)
-            except (OSError, NotebookError):
+            except Exception:
+                # e.g. UnicodeDecodeError from a non-UTF-8 external write: skip this doc, keep watching
+                log.warning("outrigger notebook: disk check failed for %s; skipping it this tick",
+                            doc.doc_id, exc_info=True)
                 continue
-            if changed:
-                broadcast(doc, _frame(doc, "doc.changed", text=doc.text, version=doc.version, by="disk"))
+            try:
+                if changed:
+                    broadcast(doc, _frame(doc, "doc.changed", text=doc.text, version=doc.version, by="disk"))
+            except Exception:
+                log.warning("outrigger notebook: broadcasting disk change for %s failed; continuing",
+                            doc.doc_id, exc_info=True)
+
+
+def _watch_done(task: asyncio.Task) -> None:
+    """Supervise the watcher: log a death loud and restart it without waiting for a doc.open."""
+    global _watch_task
+    if task.cancelled():
+        log.warning("outrigger notebook: watcher task cancelled")
+        return
+    exc = task.exception()
+    if exc is not None:
+        log.error("outrigger notebook: watcher task died; restarting", exc_info=exc)
+    if _watch_task is task:
+        _watch_task = None
+        try:
+            ensure_watcher()
+        except RuntimeError:
+            log.warning("outrigger notebook: cannot restart the watcher: no running event loop")
 
 
 def ensure_watcher() -> None:
     global _watch_task
     if _watch_task is None or _watch_task.done():
         _watch_task = asyncio.get_running_loop().create_task(_watch())
+        _watch_task.add_done_callback(_watch_done)
 
 
 # ---------------------------------------------------------------- Hermes's tools
@@ -545,6 +597,10 @@ def tool_edit(args: dict, session_id: str | None = None, **_) -> str:
     try:
         doc = doc_for_tool(session_id)
         with doc.mutex:
+            try:
+                _check_disk(doc)  # an external save within the watcher interval must not be clobbered
+            except (OSError, ValueError) as e:
+                raise NotebookError("unreadable", f"cannot refresh the note from disk: {e}")
             if args.get("version") != doc.version:
                 raise NotebookError("stale_version", f"the note is now version {doc.version}: notebook_read again")
             new = apply_edits(doc.text, args.get("edits") or [])
