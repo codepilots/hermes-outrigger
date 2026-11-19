@@ -2,15 +2,18 @@
 from __future__ import annotations
 
 import json
+import logging
 
 import re
 from dataclasses import dataclass, field
 from typing import Any
 
+log = logging.getLogger("hermes.plugins.outrigger")
+
 PROTOCOL_VERSION = 2
 SUPPORTED_PROTOCOLS = {1, 2}  # 2 adds the Outrigger platform's chat.* messages
 POLICIES = ("auto", "confirm", "deny_when_unattended")
-_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,63}$")
+_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,63}\Z")
 _CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
@@ -93,10 +96,32 @@ def _depth(obj: Any) -> int:
     return deepest
 
 
+_REF_KEYS = ("$ref", "$dynamicRef", "$recursiveRef")
+
+
+def _remote_ref(schema: Any) -> str | None:
+    """First reference target that is not a local '#' fragment, or None. The gateway
+    must never fetch a client-chosen URI (SSRF / local-file read), so hostile schemas
+    are refused at declaration; the validator registry refuses retrieval as a backstop.
+    Every dict key is scanned: over-rejecting ref-like data (const/enum) is fail-closed."""
+    stack = [schema]
+    while stack:
+        o = stack.pop()
+        if isinstance(o, dict):
+            for k, v in o.items():
+                if k in _REF_KEYS and isinstance(v, str) and not v.startswith("#"):
+                    return v[:100]
+                stack.append(v)
+        elif isinstance(o, list):
+            stack.extend(o)
+    return None
+
+
 def check_schema(schema: dict) -> str | None:
     """Why a client-declared parameter schema is refused, or None. Hermes's arguments are
     validated against it on the gateway, so it must be small, shallow and regex-free where
-    a regex would run on the gateway (patternProperties); `pattern` is left to the client."""
+    a regex would run on the gateway (patternProperties); `pattern` is left to the client.
+    References must be local '#' fragments: the gateway never fetches a client-chosen URI."""
     if _depth(schema) > MAX_SCHEMA_DEPTH:
         return f"nested deeper than {MAX_SCHEMA_DEPTH}"
     try:
@@ -107,11 +132,23 @@ def check_schema(schema: dict) -> str | None:
         return f"larger than {MAX_SCHEMA_BYTES} bytes"
     if '"patternProperties"' in text:
         return "patternProperties is not supported"
+    remote = _remote_ref(schema)
+    if remote is not None:
+        return (f"non-local reference not allowed: {one_line(remote, 100)!r} "
+                "(only '#' fragments resolve on the gateway)")
     try:
         import jsonschema
-        _validator_cls().check_schema(schema)
+        meta = jsonschema.Draft202012Validator(
+            jsonschema.Draft202012Validator.META_SCHEMA,
+            format_checker=jsonschema.Draft202012Validator.FORMAT_CHECKER,
+            registry=_local_only_registry(),
+        )
+        for error in meta.iter_errors(schema):
+            raise jsonschema.SchemaError.create_from(error)
     except ImportError:
-        pass
+        log.error("outrigger: jsonschema is not importable; refusing tool schema declarations "
+                  "(broken install: the plugin requires jsonschema>=4,<5)")
+        return "schema validation unavailable: jsonschema is not installed"
     except jsonschema.SchemaError as e:
         return f"invalid JSON Schema: {e.message[:200]}"
     except RecursionError:
@@ -120,6 +157,25 @@ def check_schema(schema: dict) -> str | None:
 
 
 _VALIDATOR = None
+_REGISTRY = None
+
+
+def _local_only_registry():
+    """Schema registry that refuses ALL retrieval. Local '#' fragment references resolve
+    from the root resource already in the registry, so any URI reaching retrieve is
+    non-local by definition; jsonschema's default registry would fetch it with urlopen
+    (http/https/file/ftp, no scheme allowlist, no timeout) — an SSRF / local-file read."""
+    global _REGISTRY
+    if _REGISTRY is None:
+        import referencing
+
+        def _refuse(uri):
+            log.warning("outrigger: refused gateway-side retrieval of schema reference %r",
+                        one_line(uri, 200))
+            raise referencing.exceptions.NoSuchResource(ref=uri)
+
+        _REGISTRY = referencing.Registry(retrieve=_refuse)
+    return _REGISTRY
 
 
 def _validator_cls():
@@ -138,12 +194,18 @@ def _validator_cls():
 
 def validate_args(schema: dict, args: Any) -> str | None:
     """Return an error string, or None if args satisfy the JSON Schema."""
+    remote = _remote_ref(schema)
+    if remote is not None:
+        # Fail closed even for reference keywords this validator does not evaluate
+        # (e.g. $recursiveRef) and in the no-jsonschema fallback, which ignores $ref.
+        return f"tool schema declares a non-local reference: {one_line(remote, 100)!r}"
     try:
         import jsonschema
     except ImportError:
         return _minimal_validate(schema, args)
     try:
-        err = jsonschema.exceptions.best_match(_validator_cls()(schema).iter_errors(args))
+        err = jsonschema.exceptions.best_match(
+            _validator_cls()(schema, registry=_local_only_registry()).iter_errors(args))
     except jsonschema.SchemaError as e:
         return f"tool declares an invalid schema: {e.message}"
     except Exception:  # untrusted schema: recursion, unresolvable $ref, anything else
@@ -164,10 +226,10 @@ _PY_TYPES = {
 
 def _type_ok(value: Any, expected) -> bool:
     names = expected if isinstance(expected, list) else [expected]
+    if any(name not in _PY_TYPES for name in names):
+        return False  # unknown type keyword: fail closed, never pass everything
     for name in names:
-        types = _PY_TYPES.get(name)
-        if types is None:
-            return True  # unknown type keyword: don't reject
+        types = _PY_TYPES[name]
         if isinstance(value, bool) and name in ("integer", "number"):
             continue
         if isinstance(value, types):

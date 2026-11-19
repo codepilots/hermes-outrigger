@@ -23,8 +23,8 @@ from pathlib import Path
 
 _lock = threading.Lock()
 _cache: dict = {"key": None, "data": {"tokens": {}}}  # key: (path, mtime_ns)
-TOKEN_RE = re.compile(r"^otr_([0-9a-f]{8})_([A-Za-z0-9_-]{32})$")
-USER_RE = re.compile(r"^[A-Za-z0-9_.@-]{1,64}$")
+TOKEN_RE = re.compile(r"^otr_([0-9a-f]{8})_([A-Za-z0-9_-]{32})\Z")
+USER_RE = re.compile(r"^[A-Za-z0-9_.@-]{1,64}\Z")
 
 
 def path() -> Path:

@@ -15,6 +15,8 @@ from .protocol import ToolDecl
 log = logging.getLogger("hermes.plugins.outrigger")
 
 MAX_CLIENTS = 16
+# Loud-warning threshold for tracked subagent marks, NOT an eviction bound:
+# marks are never evicted (see mark_subagent), so the set may exceed this.
 MAX_TRACKED_SUBAGENTS = 1024
 
 
@@ -129,9 +131,25 @@ class Registry:
     # ---- subagents
     def mark_subagent(self, session_id: str) -> None:
         with self._lock:
-            if len(self.subagents) >= MAX_TRACKED_SUBAGENTS:
-                self.subagents.pop()
+            if session_id in self.subagents:
+                return
+            # Fail closed: the mark IS the allow_subagents deny signal. Evicting
+            # any member (the old set.pop()) could unmark a LIVE subagent, which
+            # then inherits the owner's conversation_id and steals the attached
+            # clients; refusing the new mark would fail open the same way for the
+            # new child. So never evict and never refuse — retain overflow marks
+            # too, and warn loudly once the tracked count reaches the cap. Marks
+            # are reclaimed only by unmark_subagent (subagent_stop); there is no
+            # safe liveness oracle here, so a missed stop leaks memory, never
+            # authority.
             self.subagents.add(session_id)
+            if len(self.subagents) >= MAX_TRACKED_SUBAGENTS:
+                log.warning(
+                    "outrigger: subagent mark cap %d reached (%d tracked); retaining "
+                    "overflow mark for %s (fail closed). Missed subagent_stop hooks "
+                    "leak marks; every marked session stays denied while "
+                    "allow_subagents=False.",
+                    MAX_TRACKED_SUBAGENTS, len(self.subagents), session_id)
 
     def unmark_subagent(self, session_id: str) -> None:
         with self._lock:

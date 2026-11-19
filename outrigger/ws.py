@@ -25,8 +25,22 @@ MAX_MSG = 4 * 1024 * 1024
 MAX_CONCURRENCY = 8
 
 
-def _expected_key() -> str:
-    return settings.get("auth_token") or os.environ.get("API_SERVER_KEY", "")
+def _expected_key(request: web.Request | None = None) -> str:
+    """The credential this route expects: the plugin's auth_token, else the gateway's
+    OWN resolved key (the live api_server adapter reads extra['key'], profile-scoped
+    secrets and env at startup and is exposed as app['api_server_adapter']), else raw
+    env API_SERVER_KEY. Consulting the adapter's resolved key keeps a config-keyed
+    gateway from falling into keyless local-owner trust (F-10). Never logs the key."""
+    token = settings.get("auth_token")
+    if token:
+        return token
+    app = getattr(request, "app", None)
+    get = getattr(app, "get", None)
+    adapter = get("api_server_adapter") if callable(get) else None
+    key = getattr(adapter, "_api_key", "") or ""
+    if key:
+        return str(key)
+    return os.environ.get("API_SERVER_KEY", "")
 
 
 def _presented_key(request: web.Request) -> str:
@@ -92,13 +106,23 @@ def authenticate(request: web.Request) -> tuple[web.Response | None, dict | None
 
 def authorize(request: web.Request) -> web.Response | None:
     """None if allowed as the owner. Never logs headers or the key."""
-    key = _expected_key()
+    key = _expected_key(request)
     local = _is_local(request)
     if not key:
         # No credential configured: only a process on this machine (not via a proxy) may attach.
         if not local:
             log.warning("outrigger: refused remote client %s (no key configured)", _peer(request))
             return web.json_response({"error": "forbidden"}, status=403)
+        if not settings.get("allow_keyless_local"):
+            log.warning("outrigger: refused %s: no key configured and allow_keyless_local is off; "
+                        "configure auth_token or API_SERVER_KEY, or pair a token", _peer(request))
+            return web.json_response({"error": "forbidden"}, status=403)
+        # Fail loud (F-10): this admission rests on a locality heuristic (loopback + no
+        # proxy headers) that a header-less same-host relay can defeat; it is not a
+        # verified local peer. See docs/security-review/auth-trust-boundary.md.
+        log.warning("outrigger: admitted %s as OWNER with no credential (keyless local trust); "
+                    "locality is a heuristic a header-less relay can defeat — configure "
+                    "auth_token/API_SERVER_KEY or set allow_keyless_local=false", _peer(request))
         return None
     if not local and not (settings.get("allow_remote") and settings.get("owner_key_remote")):
         # The API key unlocks the whole gateway; by default it never works from outside.
@@ -123,7 +147,8 @@ _RATE: dict[str, list[float]] = {}
 
 
 def _rate_check(client: Client) -> None:
-    """Per-user limit on messages that start Hermes turns (chat and // commands)."""
+    """Per-user limit on messages that start Hermes turns (chat and // commands)
+    and on notebook doc.list / doc.open (owner/admin exempt)."""
     if not _limited(client):
         return
     per_min = int(settings.get("user_messages_per_min") or 0)
@@ -305,7 +330,7 @@ def _welcome(client: Client, session_id) -> dict:
     return msg
 
 
-_CHAT_ID_RE = __import__("re").compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+_CHAT_ID_RE = __import__("re").compile(r"^[A-Za-z0-9_.:-]{1,128}\Z")
 
 
 async def _handle_chat(client: Client, t: str, m: dict, ws) -> None:
@@ -363,9 +388,13 @@ async def _handle_doc(client: Client, t: str, m: dict, ws) -> None:
             root = str_field(m.get("root"), "root", 64, default="") or None
             query = str_field(m.get("query"), "query", 200, default="")
             limit = int_field(m.get("limit"), "limit", 1, notebook.LIST_LIMIT, default=50)
-            await ws.send_json({"type": "doc.list", "roots": sorted(allowed),
-                                "notes": notebook.listing(root, query, limit, allowed)})
+            _rate_check(client)
+            # The tree walk must not block the shared event loop for other clients (F-03).
+            notes = await asyncio.get_running_loop().run_in_executor(
+                None, notebook.listing, root, query, limit, allowed)
+            await ws.send_json({"type": "doc.list", "roots": sorted(allowed), "notes": notes})
         elif t == "doc.open":
+            _rate_check(client)
             doc = notebook.open_doc(str(m.get("root") or ""), str(m.get("path") or ""), client, allowed)
             notebook.ensure_watcher()
             await ws.send_json(notebook.content_frame(doc))
@@ -464,9 +493,16 @@ async def _handle(client: Client, m: dict, ws) -> None:
         if not isinstance(call_id, str):
             raise ProtocolError("bad_result", "call_id required")
         ok = bool(m.get("ok"))
+        error = m.get("error") if not ok else None
+        # F-07: the error field is client-controlled detail, not a gateway code.
+        # Coerce non-strings and bound the length at ingress (defense in depth;
+        # dispatch._run sanitizes and caps again before the model sees it).
+        if error is not None and not isinstance(error, str):
+            error = json.dumps(error, default=str)
+        if isinstance(error, str):
+            error = error[:int(settings.get("max_result_chars"))]
         REGISTRY.resolve(client, call_id, {
-            "ok": ok, "content": m.get("content"),
-            "error": m.get("error") if not ok else None,
+            "ok": ok, "content": m.get("content"), "error": error,
         })
     elif t.startswith("doc."):
         await _handle_doc(client, t, m, ws)

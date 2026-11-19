@@ -1,6 +1,32 @@
 """Plugin settings, filled from plugins.entries.outrigger.settings at register()."""
 from __future__ import annotations
 
+import logging
+
+log = logging.getLogger("hermes.plugins.outrigger")
+
+# Bool-typed settings may arrive as quoted YAML strings ("false") or 0/1 from a
+# UI/env path. Raw truthiness would leave a refusal switch ON for "false" (fail
+# open), so normalize them; unrecognized values log loud and use the default.
+_BOOL_TRUE = {"true", "1", "yes", "on"}
+_BOOL_FALSE = {"false", "0", "no", "off", ""}
+
+
+def _as_bool(key: str, value, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in _BOOL_TRUE:
+            return True
+        if v in _BOOL_FALSE:
+            return False
+    elif isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    log.warning("outrigger: setting %s=%r is not a boolean; using default %r "
+                "(write true/false without quotes in config.yaml)", key, value, default)
+    return default
+
 DEFAULTS = {
     "enabled_routes": True,
     # Remote access (docs/remote-access.md). A request is "local" only if it comes from
@@ -8,6 +34,11 @@ DEFAULTS = {
     # from 127.0.0.1, so its requests count as remote.
     "allow_remote": False,  # accept remote clients at all (paired tokens)
     "owner_key_remote": False,  # also accept the API key from remote clients (prefer admin tokens)
+    # F-10: admit a credential-less loopback peer as OWNER when no key exists anywhere
+    # (plugin auth_token, the gateway's resolved key, env API_SERVER_KEY). Locality is a
+    # heuristic a header-less same-host relay can defeat; off refuses every keyless
+    # owner attach. See docs/security-review/auth-trust-boundary.md.
+    "allow_keyless_local": True,
     # Toolsets for paired non-admin users' chats (Hermes's toolsets_for_source); the owner
     # and admin tokens keep the platform default. "no_mcp" keeps MCP servers out.
     "user_toolsets": ["web", "outrigger", "no_mcp"],
@@ -47,9 +78,10 @@ def load(get_config) -> None:
     """get_config is ctx.get_config(key, default)."""
     for key, default in DEFAULTS.items():
         try:
-            SETTINGS[key] = get_config(key, default)
+            raw = get_config(key, default)
         except Exception:
-            SETTINGS[key] = default
+            raw = default
+        SETTINGS[key] = _as_bool(key, raw, default) if isinstance(default, bool) else raw
 
 
 def get(key: str):
