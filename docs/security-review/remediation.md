@@ -32,7 +32,7 @@ lines), commits the fix, then the ledger entry, then dispatches the next.
 | F-05 | Notebook stale root grants (4ea8d7ce) + doc-identity aliasing (539075fd) | Low + Low | notebook.py | **fixed (7c4608c)** |
 | F-06 | Notebook shared-root indirect injection labeling (39fe8161) | Low | notebook.py | **fixed (43c5d82)** |
 | F-07 | Unbounded 4 MB error relay (0bf92726) | Low | dispatch.py, ws.py | **fixed (48c0983)** |
-| F-08 | Subagent marker eviction fail-open (9c9370fa) | Low | registry.py, __init__.py | pending |
+| F-08 | Subagent marker eviction fail-open (9c9370fa) | Low | registry.py | **fixed (5e81db0)** |
 | F-09 | Audit silent loss + identity + tamper (f37f9e4d) + artifact permissions (2eaf3124) + malformed-request unrecorded (6af3ae03) | Inconclusive→fix + Info | audit.py, dispatch.py, notebook.py, ws.py | pending |
 | F-10 | Auth locality fail-open (e75c7051) + credential-source mismatch (76d74ef9) + admin-scope mismatch (ed211e05) | Inconclusive→mitigate+residual | ws.py, platform.py, settings.py, docs | pending |
 | F-11 | Regex `$` trailing newline (c0efd191) | Informational | protocol.py, ws.py | pending |
@@ -232,3 +232,30 @@ and duplicate merges.
 - **RED evidence:** new file first run 8 failed / 9 passed (the 9 are
   preservation guards); cap/coercion/control-char/ingress tests failed for the
   right reason.
+
+### F-08 — Subagent marker eviction fail-open — FIXED (5e81db0)
+- **Delegation:** one subagent, TDD. __init__.py untouched (hooks already correct).
+- **Fix:** the mark IS the allow_subagents deny signal, so both eviction
+  (set.pop) and refusing a new mark fail open. `mark_subagent` now never evicts
+  and never refuses — idempotent, retains overflow marks, loud WARNING at/above
+  `MAX_TRACKED_SUBAGENTS` (re-commented as a warning threshold, not an eviction
+  bound). Every marked session stays denied while allow_subagents=False;
+  normal/owner sessions unaffected; allow=True still permits.
+- **Accepted deviations / design:** chose "never evict / never refuse" over
+  TTL/liveness eviction — no safe liveness oracle in scope (only subagent_stop
+  unmarks; session-end/turns logic fenced), and a TTL could unmark a live
+  long-lived subagent (fail-open). WARNING per overflow mark (not throttled, to
+  keep every overflow denial loud).
+- **Residual (documented):** missed subagent_stop hooks now leak MEMORY (marks
+  retained until unmarked) instead of authority; the cap is a loud-warning
+  threshold, not a hard bound. Bounded only by delegation volume (no established
+  attacker primitive to force marks); never a gate bypass.
+- **Parent verification (independent):** full diff read; suite re-run
+  **265 passed, 1 skipped** (256 + 9 new, zero regressions); parent probe
+  `cache/scratch/verify_subagent_parent.py` — **10 assertions pass**: no mark
+  evicted at/over cap, all subagents denied, owner binding safe, normal session
+  allowed, allow=True permits, unmark/re-mark correct, cap warning loud; static
+  greps clean.
+- **RED evidence:** new file first run 6 failed / 3 passed (the 3 are
+  preservation guards); eviction/overflow-denial/no-untracked tests failed for
+  the right reason.
