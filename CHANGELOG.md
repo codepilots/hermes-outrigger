@@ -5,7 +5,7 @@
 Full security review (`docs/security-review/scan-report.md`, sealed scan
 `scan_7606f034b84449191cdab8fa`) and remediation of every retained finding.
 Item-by-item evidence, RED/GREEN tests and independent parent verification are in
-`docs/security-review/remediation.md`. Suite: **360 passed, 1 skipped** (145 at
+`docs/security-review/remediation.md`. Suite: **386 passed, 1 skipped** (145 at
 scan baseline). No functional/behaviour changes beyond the security fixes below;
 legitimate local-owner and paired-token access preserved throughout.
 
@@ -74,6 +74,18 @@ legitimate local-owner and paired-token access preserved throughout.
   reflects the gateway-key precedence; `_rate_check` docstring covers
   `doc.list`/`doc.open`; `docs/remote-access.md` cross-references the residual
   trust-boundary model.
+
+### Known limitations (decided behavior + open residuals)
+- **F-05 mid-turn grant narrowing — decided, kept (19 Nov 2026):** a `//` command
+  is authorized at start; if the user's root grants narrow mid-turn, the in-flight
+  command's `notebook_read`/`notebook_edit` calls continue until turn end.
+  Client-initiated writes are revoked immediately. Pinned by
+  `test_inflight_command_completes_after_midturn_narrowing`.
+- **F-10 auth trust boundary — operator-owned residuals:** the locality heuristic
+  cannot distinguish a header-less same-host relay over TCP; gateways without the
+  app-key hook fall back to plugin+env key sources; true per-token admin needs a
+  gateway API change. See `docs/security-review/auth-trust-boundary.md`.
+- **Revocation latency:** ~20 s propagation (documented design, review-rejected).
 
 ## 0.1.0
 - Initial release.

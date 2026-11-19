@@ -176,6 +176,7 @@ and duplicate merges.
   revoked; an in-flight // command's Hermes notebook_edit (doc_for_tool path,
   authorized at command start) continues until turn end — a narrow mid-turn
   revocation window, not a new client write path (independent review follow-up).
+  **Owner decision 19 Nov 2026: kept as-is** — see the decision entry at close-out.
 - **Parent verification (independent):** full diff read; suite re-run
   **234 passed, 1 skipped** (225 + 9 new, zero regressions); parent probe
   `cache/scratch/verify_grants_parent.py` — **10 assertions pass**: narrowing
@@ -386,10 +387,27 @@ residual trust boundary documented in auth-trust-boundary.md).
 - **INFO (documented): F-05 in-flight-command window.** A narrowed user's
   in-flight `//` command keeps editing via `doc_for_tool` until turn end
   (authorized at start; no new client write path). Added to F-05 residuals;
-  "fully revoked" wording qualified. Behavior unchanged (mid-turn abort would be
-  a functional change — left for discussion).
+  "fully revoked" wording qualified. Behavior kept by owner decision 19 Nov 2026
+  (mid-turn abort would be a functional change) — recorded below.
 - **Doc nits fixed:** `auth-trust-boundary.md` stale "docs follow-up" (now
   declared + coerced); CHANGELOG F-07 direction ("to the model"); this close-out
   entry added.
 - **Suite after follow-ups: 385 passed, 1 skipped** (360 + 21 bool + 1 dir + 3
   tokens), zero regressions; static greps clean.
+
+### F-05 in-flight window — owner decision (19 Nov 2026)
+- **Decision (Autumn):** keep the behavior as-is — a mid-turn grant narrowing does
+  NOT abort an in-flight `//` command; the turn finishes (authorized at start).
+  Document it as decided behavior, not an open question.
+- **Documentation (4abf966):** `doc_for_tool` docstring now states the authorization
+  model and the decided window (client writes fully revoked; tool path continues to
+  `end_command`); CHANGELOG gains a "Known limitations" section carrying this decision,
+  the F-10 operator-owned residuals and the ~20 s revocation latency; CHANGELOG suite
+  count refreshed (360 → 386).
+- **Preservation test:** `test_inflight_command_completes_after_midturn_narrowing`
+  (tests/test_notebook_grants.py) pins the decision — mid-turn narrowing refuses
+  `get()` with `not_allowed`, `doc_for_tool`/`tool_read`/`tool_edit` still work and
+  write to disk, `end_command` closes the window (`no_command`). Guards against a
+  future silent behavior change in either direction.
+- **Verification:** suite re-run twice, identical counts — **386 passed, 1 skipped**
+  (385 + 1 preservation test), zero regressions. No behavior change in this commit.
