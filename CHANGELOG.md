@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.2.1 — 2026-11-19 — Claims-pass hardening
+
+Two follow-ups from the human-audit refactor's claims pass, owner-approved.
+Evidence: `docs/security-review/remediation.md` (H-01/H-02). Suite:
+**404 passed, 1 skipped** (386 at 0.2.0 + 18 new TDD tests).
+
+### Fixed
+- **H-01 — capture-write failures no longer escape the audit trail**
+  (`dispatch.py`): an OSError in `_save_capture` (disk full, permissions,
+  occupied path) is logged loud (folder + reason, never image bytes) and
+  returned as `image_error`; the tool call completes and IS audited. Success
+  path unchanged (shape, 0600, retention).
+- **H-02 — non-dict token-store JSON takes the empty-store path**
+  (`tokens.py`): any malformed store, including non-dict top-level JSON,
+  yields the empty store (fail closed: no token verifies, no exception)
+  instead of raising AttributeError.
+
+### Known limitations
+- A capture lost to a write error is still lost — the fix guarantees audit
+  completeness, not capture durability.
+- Corrupt token stores route silently to the empty store (documented contract).
+
 ## 0.2.0 — 2026-11-19 — Security remediation
 
 Full security review (`docs/security-review/scan-report.md`, sealed scan
