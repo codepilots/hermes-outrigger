@@ -175,7 +175,17 @@ def _run(client: Client, sid: str, decl, tool: str, call_args: dict, timeout: fl
     if isinstance(code, str) and not code.startswith("outrigger_"):
         detail = sanitize_text(str(code), 2000)[0]
         return "error", _err("outrigger_tool_error", detail)
-    return "cancelled" if code == "outrigger_cancelled" else "error", _err(code, str(msg.get("message", "")))
+    # F-07: outrigger_-prefixed strings and non-string errors are client-controlled
+    # detail too. Coerce, strip control chars and cap with the same bound as the ok
+    # path; short gateway codes (outrigger_cancelled, outrigger_timeout, …) pass
+    # through the cap unchanged, so their meaning and the cancelled status survive.
+    if not isinstance(code, str):
+        code = json.dumps(code, default=str)
+    limit = min(decl.max_result_chars or settings.get("max_result_chars"),
+                settings.get("max_result_chars"))
+    code, _ = sanitize_text(code, limit)
+    message = sanitize_text(str(msg.get("message", "")), limit)[0]
+    return "cancelled" if code == "outrigger_cancelled" else "error", _err(code, message)
 
 
 CAPTURE_TYPES = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}

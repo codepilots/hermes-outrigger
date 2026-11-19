@@ -468,9 +468,16 @@ async def _handle(client: Client, m: dict, ws) -> None:
         if not isinstance(call_id, str):
             raise ProtocolError("bad_result", "call_id required")
         ok = bool(m.get("ok"))
+        error = m.get("error") if not ok else None
+        # F-07: the error field is client-controlled detail, not a gateway code.
+        # Coerce non-strings and bound the length at ingress (defense in depth;
+        # dispatch._run sanitizes and caps again before the model sees it).
+        if error is not None and not isinstance(error, str):
+            error = json.dumps(error, default=str)
+        if isinstance(error, str):
+            error = error[:int(settings.get("max_result_chars"))]
         REGISTRY.resolve(client, call_id, {
-            "ok": ok, "content": m.get("content"),
-            "error": m.get("error") if not ok else None,
+            "ok": ok, "content": m.get("content"), "error": error,
         })
     elif t.startswith("doc."):
         await _handle_doc(client, t, m, ws)
