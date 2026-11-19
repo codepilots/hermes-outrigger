@@ -33,7 +33,7 @@ lines), commits the fix, then the ledger entry, then dispatches the next.
 | F-06 | Notebook shared-root indirect injection labeling (39fe8161) | Low | notebook.py | **fixed (43c5d82)** |
 | F-07 | Unbounded 4 MB error relay (0bf92726) | Low | dispatch.py, ws.py | **fixed (48c0983)** |
 | F-08 | Subagent marker eviction fail-open (9c9370fa) | Low | registry.py | **fixed (5e81db0)** |
-| F-09 | Audit silent loss + identity + tamper (f37f9e4d) + artifact permissions (2eaf3124) + malformed-request unrecorded (6af3ae03) | Inconclusive→fix + Info | audit.py, dispatch.py, notebook.py, ws.py | pending |
+| F-09 | Audit silent loss + identity + tamper (f37f9e4d) + artifact permissions (2eaf3124) + malformed-request unrecorded (6af3ae03) | Inconclusive→fix + Info | audit.py, dispatch.py, notebook.py | **fixed (42bf71b)** |
 | F-10 | Auth locality fail-open (e75c7051) + credential-source mismatch (76d74ef9) + admin-scope mismatch (ed211e05) | Inconclusive→mitigate+residual | ws.py, platform.py, settings.py, docs | pending |
 | F-11 | Regex `$` trailing newline (c0efd191) | Informational | protocol.py, ws.py | pending |
 
@@ -259,3 +259,31 @@ and duplicate merges.
 - **RED evidence:** new file first run 6 failed / 3 passed (the 3 are
   preservation guards); eviction/overflow-denial/no-untracked tests failed for
   the right reason.
+
+### F-09 — Audit fail-loud + identity + artifact permissions — FIXED (42bf71b)
+- **Delegation:** one subagent, TDD. ws.py not needed (ws._register already sets
+  client.principal; identity threaded at dispatch call sites).
+- **Fix (fail-loud priority):** `audit.record` logs ERROR (path+reason+tool/
+  session/outcome) and increments a thread-safe `_write_failures` counter on
+  OSError instead of silent pass — a lost entry never breaks a call but is
+  observable; entries carry the stable `client.principal` (kind/user_id/token id,
+  no secret) across all dispatch audit sites incl. rejections; audit.jsonl,
+  captures and snapshots created 0600 via os.open (like the token store);
+  malformed outrigger_call routed through reject() so it is audited.
+- **Accepted deviations:** principal stored as the full client.principal dict
+  (no secret/hash; probe-verified absent), omitted for pre-client rejections;
+  0600 is creation-only (pre-existing artifacts keep their mode, same semantics
+  as tokens._save); counter under the existing _lock, log ERROR without exc_info.
+- **Residuals (follow-ups, out of scope):** audit rotation/size cap (file grows
+  unbounded); hash-chain/signature tamper evidence (offline edits undetectable);
+  notebook edits + platform chat outside audit.jsonl scope; tightening modes of
+  pre-existing artifacts / plugin-data dir.
+- **Parent verification (independent):** full diff read; suite re-run
+  **281 passed, 1 skipped** (265 + 16 new, zero regressions); parent probe
+  `cache/scratch/verify_audit_parent.py` — **12 assertions pass**: write failure
+  loud + counted + never raises, counter climbs, recovery writes, principal in
+  entry, audit/snapshot 0600, malformed audited, note-file mode preserved;
+  static greps clean.
+- **RED evidence:** new file first run 14 failed / 2 passed (the 2 are
+  preservation guards); fail-loud/identity/0600/malformed tests failed for the
+  right reason.
