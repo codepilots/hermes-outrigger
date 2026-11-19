@@ -163,9 +163,9 @@ heuristic remains, and the finding remains open as a deployment residual.**
    *every* credential-less owner attach, local or relayed, with 403 + loud
    warning. Paired-token and keyed auth are untouched. Default `true` preserves
    legitimate keyless local dev; shared-host operators should set `false` or
-   configure a key. (The setting is read through `settings.load`; the loader
-   accepts undeclared keys — `plugin.yaml`'s `config_schema` was outside the
-   change fence, so declaring it there is a docs follow-up.)
+   configure a key. (Declared in `plugin.yaml` `config_schema` at close-out;
+   `settings.load` now coerces bool-ish strings, so a quoted `"false"` cannot
+   leave the switch on — see the review follow-up below.)
 3. **§1's key-source fix removes the keyless branch entirely whenever the
    gateway is keyed** — the relay then faces the same key requirement as every
    other gateway route (probe 3a: relayed credential-less connection → 401).

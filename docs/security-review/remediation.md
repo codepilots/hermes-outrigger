@@ -172,7 +172,10 @@ and duplicate merges.
   os.replace changes the inode); case/Unicode variants on case-insensitive hosts
   (not protocol-triggerable on the pinned Linux/ext4); a narrowed user still
   receives doc.changed broadcasts on a held-open doc until close/disconnect
-  (broadcast is F-04 territory) — write authorization is fully revoked.
+  (broadcast is F-04 territory). Client-initiated writes via get() are fully
+  revoked; an in-flight // command's Hermes notebook_edit (doc_for_tool path,
+  authorized at command start) continues until turn end — a narrow mid-turn
+  revocation window, not a new client write path (independent review follow-up).
 - **Parent verification (independent):** full diff read; suite re-run
   **234 passed, 1 skipped** (225 + 9 new, zero regressions); parent probe
   `cache/scratch/verify_grants_parent.py` — **10 assertions pass**: narrowing
@@ -344,6 +347,49 @@ and duplicate merges.
 
 ## Backlog empty — close-out
 All 11 items addressed: F-01..F-09 + F-11 fixed; F-10 mitigated (honest partial,
-residual trust boundary documented in auth-trust-boundary.md). Suite 360 passed,
-1 skipped. Close-out pass (claims pass, CHANGELOG, version, independent HEAD
-review) recorded below as it completes.
+residual trust boundary documented in auth-trust-boundary.md).
+
+### Claims pass + release metadata (06fa627)
+- Manifest/doc consistency: declared `allow_keyless_local` in `config_schema`;
+  `auth_token` description reflects the gateway-key precedence; `_rate_check`
+  docstring covers `doc.list`/`doc.open`; `remote-access.md` locality table +
+  heuristic caveat cross-reference `auth-trust-boundary.md`.
+- `CHANGELOG.md` added (all 11 items, F-10 honest partial); version 0.1.0 → 0.2.0.
+- Overclaim grep over code/manifest/docs: clean (the F-02 "DENY enforced"
+  docstring was already corrected to advisory-unless-block).
+
+### Independent read-only review of HEAD (fresh subagent, no repo writes)
+- **Verdict:** all F-01..F-11 confirmed present AND correct in current source,
+  each re-probed via stdin (zero-fetch SSRF probe, args-budget, caps/eviction,
+  grant narrowing, 2000 retained subagent marks, audit 0600 under umask 0,
+  keyed-gateway keyless refusal, trailing-LF rejection). F-10 residual doc
+  cross-checked against the installed gateway — honest, no overclaim. Suite
+  360 passed, 1 skipped. No fix absent/incorrect/partial beyond the ledger.
+- **One actionable LOW new issue + informational items found** → fixed below.
+
+### Review follow-ups (this commit)
+- **LOW (fixed): `allow_keyless_local` string fail-open.** `authorize` tested raw
+  truthiness; a quoted YAML `"false"` is truthy → keyless owner stayed ON.
+  `settings.load` now coerces bool-typed settings (`_as_bool`: true/false-ish
+  strings + 0/1; unrecognized → loud warning + declared default). Fixes the new
+  switch AND the pre-existing `allow_remote`/`owner_key_remote` latent pattern.
+  Production path confirmed: `register()` → `settings.load(ctx.get_config)`
+  (`__init__.py:82`). TDD: `tests/test_settings_bool.py` (21 tests, RED 17 fail →
+  GREEN). Parent probe `cache/scratch/verify_bool_parent.py` — 8 assertions pass
+  (quoted "false" → 403; "true" admits; allow_remote/owner_key_remote coerced).
+- **INFO (fixed): dir-heavy walk.** `doc.list` now bounds directory visits as well
+  as files (`dirs_visited` vs `LIST_WALK_LIMIT`); file-cap semantics unchanged.
+  Test `test_listing_walk_bounds_directories`.
+- **INFO (fixed): `tokens.py` regex consistency.** `TOKEN_RE`/`USER_RE` `$` → `\Z`
+  (F-11 class; practically unexploitable — Bearer strips, headers carry no LF).
+  Tests `tests/test_review_followups.py`.
+- **INFO (documented): F-05 in-flight-command window.** A narrowed user's
+  in-flight `//` command keeps editing via `doc_for_tool` until turn end
+  (authorized at start; no new client write path). Added to F-05 residuals;
+  "fully revoked" wording qualified. Behavior unchanged (mid-turn abort would be
+  a functional change — left for discussion).
+- **Doc nits fixed:** `auth-trust-boundary.md` stale "docs follow-up" (now
+  declared + coerced); CHANGELOG F-07 direction ("to the model"); this close-out
+  entry added.
+- **Suite after follow-ups: 385 passed, 1 skipped** (360 + 21 bool + 1 dir + 3
+  tokens), zero regressions; static greps clean.

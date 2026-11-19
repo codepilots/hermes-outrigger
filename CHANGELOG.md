@@ -37,7 +37,7 @@ legitimate local-owner and paired-token access preserved throughout.
   results marked `untrusted: True`; schema/command framing states note content is
   collaborator-written data, never instructions.
 - **F-07 — Unbounded error relay** (`dispatch.py`, `ws.py`): error payloads capped
-  before relay to clients.
+  before relay to the model.
 - **F-08 — Subagent marker eviction fail-open** (`registry.py`): `mark_subagent`
   never evicts and never refuses (the mark *is* the deny signal); the cap is a
   loud warning threshold. Missed stop-hooks leak memory, never authority.

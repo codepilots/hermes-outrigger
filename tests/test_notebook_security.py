@@ -221,6 +221,28 @@ def test_listing_walk_is_bounded(vault, monkeypatch, caplog):
     assert any("walk" in r.message.lower() or "cap" in r.message.lower() for r in caplog.records)
 
 
+def test_listing_walk_bounds_directories(vault, monkeypatch, caplog):
+    # Dir-heavy tree with no .md files: the file cap alone would never trip, so
+    # the walk must also bound directory visits (independent review follow-up).
+    big = vault / "dirs"
+    for d in range(200):
+        (big / f"d{d}").mkdir(parents=True)
+    monkeypatch.setattr(notebook, "LIST_WALK_LIMIT", 50, raising=False)
+    real_walk = notebook.os.walk
+    count = {"n": 0}
+
+    def counting_walk(*a, **k):
+        for item in real_walk(*a, **k):
+            count["n"] += 1
+            yield item
+
+    monkeypatch.setattr(notebook.os, "walk", counting_walk)
+    with caplog.at_level(logging.WARNING, logger=LOG):
+        notebook.listing(limit=200)
+    assert count["n"] <= 55, f"walked {count['n']} dirs — directory walk unbounded"
+    assert any("walk" in r.message.lower() or "cap" in r.message.lower() for r in caplog.records)
+
+
 # ---------------------------------------------------------------- normal use still works
 
 async def test_normal_listing_and_open_within_limits(aiohttp_client, vault):

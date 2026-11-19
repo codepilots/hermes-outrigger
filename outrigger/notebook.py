@@ -26,7 +26,7 @@ log = logging.getLogger("hermes.plugins.outrigger")
 SNAPSHOTS_KEPT = 10
 WATCH_INTERVAL = 2.0
 LIST_LIMIT = 200
-LIST_WALK_LIMIT = 5000   # files visited per listing: bounds the walk itself, not just the results
+LIST_WALK_LIMIT = 5000   # files and directories visited per listing: bounds the walk itself, not just the results
 MAX_OPEN_DOCS = 64       # global cap on retained documents (each up to notebook_max_bytes)
 MAX_DOCS_PER_CLIENT = 16  # distinct notes one client may hold open at once
 _HIDDEN = re.compile(r"(^|/)\.")
@@ -105,11 +105,16 @@ def listing(root: str | None = None, query: str = "", limit: int = 50, allowed: 
     q = (query or "").lower().strip()
     found = []
     visited = 0
+    dirs_visited = 0
     capped = False
     for name, base in roots().items():
         if (root and name != root) or (allowed is not None and name not in allowed):
             continue
         for dirpath, dirnames, filenames in os.walk(base):
+            dirs_visited += 1
+            if dirs_visited >= LIST_WALK_LIMIT:
+                capped = True
+                break
             dirnames[:] = [d for d in dirnames if not d.startswith(".")]
             for fn in filenames:
                 if visited >= LIST_WALK_LIMIT:
@@ -132,7 +137,7 @@ def listing(root: str | None = None, query: str = "", limit: int = 50, allowed: 
         if capped:
             break
     if capped:
-        log.warning("outrigger notebook: doc.list walk stopped at the %d-file cap; listing may be incomplete", LIST_WALK_LIMIT)
+        log.warning("outrigger notebook: doc.list walk stopped at the %d-entry cap (files/directories); listing may be incomplete", LIST_WALK_LIMIT)
     found.sort(key=lambda d: d["mtime"], reverse=True)
     return found[:max(1, min(int(limit or 50), LIST_LIMIT))]
 
