@@ -35,7 +35,7 @@ lines), commits the fix, then the ledger entry, then dispatches the next.
 | F-08 | Subagent marker eviction fail-open (9c9370fa) | Low | registry.py | **fixed (5e81db0)** |
 | F-09 | Audit silent loss + identity + tamper (f37f9e4d) + artifact permissions (2eaf3124) + malformed-request unrecorded (6af3ae03) | Inconclusive→fix + Info | audit.py, dispatch.py, notebook.py | **fixed (42bf71b)** |
 | F-10 | Auth locality fail-open (e75c7051) + credential-source mismatch (76d74ef9) + admin-scope mismatch (ed211e05) | Inconclusive→mitigate+residual | ws.py, platform.py, settings.py, docs | **mitigated (4668957) — partial** |
-| F-11 | Regex `$` trailing newline (c0efd191) | Informational | protocol.py, ws.py | pending |
+| F-11 | Regex `$` trailing newline (c0efd191) | Informational | protocol.py, ws.py | **fixed (b2f594c)** |
 
 Rejected by the review (no action): CSWSH/Origin (4a1ae1ca — gateway CORS
 default-denies), revocation latency (84be8801/ef3b710a — documented ~20s design),
@@ -326,3 +326,24 @@ and duplicate merges.
 - **RED evidence:** new file first run 12 failed / 13 passed (the 13 are
   preservation guards); keyless/wrong-key admission, missing-warning and
   admin-scope tests failed for the right reason.
+
+### F-11 — Regex trailing-newline — FIXED (b2f594c)
+- **Delegation:** one subagent, TDD. Informational (CWE-20), no escalation.
+- **Fix:** `_NAME_RE` (protocol.py:16) and `_CHAT_ID_RE` (ws.py:332) anchors
+  `$` → `\Z` (minimal 2-char diff); character classes, length bounds and `.match`
+  call sites unchanged. Trailing LF in tool names / chat ids now rejected.
+- **Parent verification (independent):** full diff read; suite re-run
+  **360 passed, 1 skipped** (306 + 54 new, zero regressions); parent probe
+  `cache/scratch/verify_names_parent.py` — **16 assertions pass**: trailing LF
+  rejected (tool + chat id), valid names accepted, leading LF/trailing space/CRLF
+  rejected, length boundaries (64/65, 128/129) unchanged; static greps clean.
+- **RED evidence:** new file first run 5 failed / 49 passed (the 49 are invariant
+  guards); the 5 trailing-newline acceptances failed for the right reason.
+- **Note:** scan-report cites pre-F-09/F-10 line numbers (protocol.py:13/37,
+  ws.py:308/315); current HEAD lines are 16/41 and 332/340 — mechanism identical.
+
+## Backlog empty — close-out
+All 11 items addressed: F-01..F-09 + F-11 fixed; F-10 mitigated (honest partial,
+residual trust boundary documented in auth-trust-boundary.md). Suite 360 passed,
+1 skipped. Close-out pass (claims pass, CHANGELOG, version, independent HEAD
+review) recorded below as it completes.
