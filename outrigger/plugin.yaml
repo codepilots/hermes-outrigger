@@ -1,5 +1,5 @@
 name: outrigger
-version: 0.2.0
+version: 0.2.1
 manifest_version: 2
 description: Let a thin client attach to a Hermes session and offer tools that run on the client.
 author: Autumn Thomson

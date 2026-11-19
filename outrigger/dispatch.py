@@ -200,7 +200,9 @@ KEEP_CAPTURES = 20
 def _save_capture(image) -> dict:
     """A client tool returned an image ({mime, data: base64}). A plugin tool's result is text
     to the model, so the image is saved as a file and Hermes is told to open it with its
-    vision_analyze tool (which shows it natively on vision-capable models, else describes it)."""
+    vision_analyze tool (which shows it natively on vision-capable models, else describes it).
+    A write/prune OSError (disk full, permissions, path occupied) is logged loud and returned
+    as image_error so the call still completes and is audited — it never escapes to the caller."""
     import base64
     import os
     import secrets
@@ -223,13 +225,20 @@ def _save_capture(image) -> dict:
         return {"image_error": f"data is not a {mime} image"}
     home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
     folder = home / "plugin-data" / "outrigger" / "captures"
-    folder.mkdir(parents=True, exist_ok=True)
-    path = folder / f"{time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(3)}{ext}"
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "wb") as f:
-        f.write(raw)
-    for old in sorted(folder.iterdir(), key=lambda p: p.stat().st_mtime)[:-KEEP_CAPTURES]:
-        old.unlink(missing_ok=True)
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / f"{time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(3)}{ext}"
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(raw)
+        for old in sorted(folder.iterdir(), key=lambda p: p.stat().st_mtime)[:-KEEP_CAPTURES]:
+            old.unlink(missing_ok=True)
+    except OSError as e:
+        # A lost capture must never swallow the call's audit entry: log the path and
+        # reason loud (never the image bytes) and let _format_ok finish with image_error.
+        log.warning("outrigger: capture write failed for %s: %s — image not saved; the tool "
+                    "call continues and is audited with image_error", folder, e)
+        return {"image_error": f"capture write failed: {type(e).__name__}"}
     return {"image_path": str(path), "bytes": len(raw),
             "hint": "Open it with vision_analyze (image_url = image_path) to look at it."}
 

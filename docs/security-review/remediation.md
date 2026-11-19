@@ -411,3 +411,65 @@ residual trust boundary documented in auth-trust-boundary.md).
   future silent behavior change in either direction.
 - **Verification:** suite re-run twice, identical counts — **386 passed, 1 skipped**
   (385 + 1 preservation test), zero regressions. No behavior change in this commit.
+
+## Claims-pass hardening (post-0.2.0)
+
+Items surfaced by the human-audit refactor's claims pass (19 Nov 2026),
+owner-approved as a behavior-changing remediation pass on branch
+`fix/claims-pass-hardening` (from main `27c07ba`). One tightly-scoped delegation
+(the I/O-hardening pair), TDD per item, parent-verified independently.
+
+### H-01 — Capture-write OSError escapes the audit trail — FIXED (8a78dbf)
+- **Finding:** `dispatch._save_capture`'s mkdir/open/write/prune block had no
+  guard; an OSError (disk full, permissions, captures path occupied by a file)
+  propagated through `_format_ok` → `_run` → `outrigger_call` BEFORE
+  `audit.record` — the call's outcome escaped audit.jsonl (loud via the handler
+  safety net, but unaudited).
+- **Fix:** try/except OSError around the whole write+prune block → WARNING
+  (captures folder + exception, never image bytes) + return
+  `{"image_error": "capture write failed: ExcName"}`; the call completes and IS
+  audited as ok. Success path unchanged (return shape, 0600 creation, retention).
+- **RED evidence:** 4 failure-path tests failed pre-fix with the propagating
+  FileExistsError (mkdir) / PermissionError (os.open); the 2 preservation tests
+  passed by design. Log: `cache/scratch/h01_red_run.txt`.
+- **Tests (6):** file-occupied path; chmod-000 dir (restored in finally,
+  skipif-root); caplog WARNING with path+reason; success shape/mode/bytes;
+  retention prune; e2e through the real aiohttp harness — broken captures →
+  ok JSON carrying image_error AND an audit entry with outcome ok.
+- **Child probe:** `probe_h01_capture_guard.py` — 28 assertions, incl. a REAL
+  OS write failure via RLIMIT_FSIZE (EFBIG mid-write), an ENOSPC stub at
+  os.open, and no base64/raw image bytes in any log record.
+- **Parent verification (independent):** full diff read (confined to
+  `_save_capture` + docstring); suite **404 passed, 1 skipped** twice, identical
+  (386 + 18 new); parent probe `cache/scratch/verify_hardening_parent.py` —
+  **30 assertions pass**, incl. an independent e2e (audit entry count +1,
+  outcome ok, image_error in the result); static grep: one benign hit
+  (`secrets.token_hex` capture filename — pre-existing line moved into the try).
+- **Residuals:** a capture lost to OSError is still lost (the fix guarantees
+  audit completeness, not capture durability); a partial file from a mid-write
+  failure can remain and counts toward retention (pre-existing semantics).
+
+### H-02 — Non-dict token-store JSON raises — FIXED (8a78dbf)
+- **Finding:** `tokens._load` called `data.get` on the `json.loads` result; a
+  non-dict top-level JSON value ('[1,2,3]', '"str"', '42', 'null') raised
+  AttributeError OUTSIDE the existing `except (OSError, ValueError)` — fail
+  closed via the handshake erroring out, but not the documented empty-store path.
+- **Fix:** `if not isinstance(data, dict): raise ValueError("bad token file")`
+  inside the existing try, before the shape check — every corrupt shape now
+  routes through the empty-store path (fail closed: no token verifies, no
+  exception). Docstring states the contract. Nothing else in tokens.py changed.
+- **RED evidence:** 8 tests failed pre-fix with AttributeError (2 per shape ×
+  4 shapes); the 4 preservation tests passed. Log: `cache/scratch/h02_red_run.txt`.
+- **Tests (12):** 4 shapes × (empty store + previously-valid token stops
+  verifying); valid store loads; dict-shaped corruption; missing file; mtime
+  cache hit/invalidation. State-neutral: autouse fixture deep-copies/resets/
+  restores `tokens._cache` per test.
+- **Child probe:** `probe_h02_token_shapes.py` — 105 assertions: 16 shapes
+  (the 4 + whitespace/BOM variants + true/float/{"tokens":[]}/truncated), each
+  against a live minted token; recovery via `_save` and via mint-after-corruption.
+- **Parent verification (independent):** diff confined to `_load` + docstring;
+  suite 404×2 identical; parent probe (same file as H-01) — shape/fail-closed/
+  recovery assertions pass; static greps clean.
+- **Residual:** corrupt stores route silently to the empty store — the
+  documented pre-existing contract, preserved by design (fail-closed behavior
+  now tested and probed).
