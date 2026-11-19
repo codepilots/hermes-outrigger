@@ -26,7 +26,7 @@ lines), commits the fix, then the ledger entry, then dispatches the next.
 | Item | Findings (candidate IDs) | Severity | Files | Status |
 |------|--------------------------|----------|-------|--------|
 | F-01 | SSRF via schema `$ref` (8a3f0a04) + schema-check fail-open (231342bf) | Medium + Low | protocol.py | **fixed (f3bd438)** |
-| F-02 | Reviewer padded-args truncation (27db6f36) + `</untrusted>` delimiter escape (5a654c56) | Medium + Low | reviewer.py, dispatch.py, plugin.yaml | pending |
+| F-02 | Reviewer padded-args truncation (27db6f36) + `</untrusted>` delimiter escape (5a654c56) | Medium + Low | reviewer.py, plugin.yaml | **fixed (93a58ea)** |
 | F-03 | Notebook unbounded cache + on-loop `doc.list` DoS (f3441f81) | Medium | notebook.py, ws.py | pending |
 | F-04 | Notebook watcher silent exception (245216c2) + `tool_edit` no disk refresh (b26e85aa) | Low + Low | notebook.py | pending |
 | F-05 | Notebook stale root grants (4ea8d7ce) + doc-identity aliasing (539075fd) | Low + Low | notebook.py, ws.py | pending |
@@ -69,3 +69,27 @@ and duplicate merges.
   greps on added lines clean (no eval/exec/subprocess/secret/fetch sinks).
 - **RED evidence:** new file first run 31 failed / 4 passed (the 4 are
   regression guards); fetch tests failed with the exploit reproduced in-test.
+
+### F-02 — Reviewer truncation + delimiter escape — FIXED (93a58ea)
+- **Delegation:** one subagent, TDD (reused FakeLLM/setup from test_reviewer.py).
+- **Fix:** args serialized first with `ARGS_BUDGET=8000`; over-budget or
+  unserializable args force `escalate` + loud warning BEFORE any model call;
+  context bounded separately (`CONTEXT_BUDGET=4000`) with truncation marker so
+  padding cannot eat args; `_DEFANG` neutralizes `<untrusted>`/`</untrusted>`
+  case/whitespace variants in the data region; docstring + plugin.yaml `review`
+  description corrected to advisory-unless-block. `review_deny` default unchanged.
+- **Accepted deviations:** defang (strip/escape) instead of a nonce boundary —
+  existing test_reviewer.py pins the literal wrapper tags and small-call JSON
+  validity; dispatch.py NOT modified (escalate already travels to the client as
+  advisory; confirmed by integration tests under ask and block); budget values
+  are a design choice, not operator settings; defang mutates only the reviewer
+  prompt copy, never the executed args sent to the client.
+- **Parent verification (independent):** full diff read; suite re-run
+  **203 passed, 1 skipped** (180 + 23 new, zero regressions); parent probe
+  `cache/scratch/verify_reviewer_parent.py` — **19 assertions pass**: oversized
+  → escalate with model never called, delimiter variants leave exactly one
+  wrapper tag, args complete under 27 KB context padding, caller args dict
+  untouched, circular args escalate, config/docs honest; static greps clean.
+- **RED evidence:** new file first run 14 failed / 9 passed (the 9 are guards);
+  oversized-approve, delimiter-breakout and honest-docs tests failed for the
+  right reason.
