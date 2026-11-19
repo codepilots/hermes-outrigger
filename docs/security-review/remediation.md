@@ -27,7 +27,7 @@ lines), commits the fix, then the ledger entry, then dispatches the next.
 |------|--------------------------|----------|-------|--------|
 | F-01 | SSRF via schema `$ref` (8a3f0a04) + schema-check fail-open (231342bf) | Medium + Low | protocol.py | **fixed (f3bd438)** |
 | F-02 | Reviewer padded-args truncation (27db6f36) + `</untrusted>` delimiter escape (5a654c56) | Medium + Low | reviewer.py, plugin.yaml | **fixed (93a58ea)** |
-| F-03 | Notebook unbounded cache + on-loop `doc.list` DoS (f3441f81) | Medium | notebook.py, ws.py | pending |
+| F-03 | Notebook unbounded cache + on-loop `doc.list` DoS (f3441f81) | Medium | notebook.py, ws.py | **fixed (aa95320)** |
 | F-04 | Notebook watcher silent exception (245216c2) + `tool_edit` no disk refresh (b26e85aa) | Low + Low | notebook.py | pending |
 | F-05 | Notebook stale root grants (4ea8d7ce) + doc-identity aliasing (539075fd) | Low + Low | notebook.py, ws.py | pending |
 | F-06 | Notebook shared-root indirect injection labeling (39fe8161) | Low | notebook.py, dispatch.py | pending |
@@ -93,3 +93,31 @@ and duplicate merges.
 - **RED evidence:** new file first run 14 failed / 9 passed (the 9 are guards);
   oversized-approve, delimiter-breakout and honest-docs tests failed for the
   right reason.
+
+### F-03 — Notebook open-doc memory + listing CPU DoS — FIXED (aa95320)
+- **Delegation:** one subagent, TDD (reused test_notebook.py setup).
+- **Fix:** global cap `MAX_OPEN_DOCS=64` + per-client `MAX_DOCS_PER_CLIENT=16`;
+  `_evict_idle_docs` LRU-evicts only clientless AND unlocked docs, else refuses
+  `too_many_docs` (held/locked notes never evicted), loud WARNING; listing walk
+  bounded at `LIST_WALK_LIMIT=5000` visited files (loud WARNING) and dispatched
+  off the event loop via `run_in_executor` in ws.py doc.list; `_rate_check`
+  applied to doc.list/doc.open (owner/admin exempt). `Doc.last_used` field added
+  for LRU recency.
+- **Accepted deviations:** caps are module constants, not operator settings
+  (settings.py fenced); worst-case retained text 64 × notebook_max_bytes
+  (128 MiB default); eviction is a safety net (close_doc already pops clientless
+  unlocked docs), refusal is the primary bound; shared `_rate_check` budget
+  reused for notebook reads (permitted).
+- **Docs follow-up (for the refactor/audit pass):** `_rate_check`'s docstring
+  ("messages that start Hermes turns") is now understated — it also guards
+  doc.list/doc.open. Left unedited (outside the ws.py allowlist); flag for the
+  documentation pass.
+- **Parent verification (independent):** full diff read; suite re-run
+  **212 passed, 1 skipped** (203 + 9 new, zero regressions); parent probe
+  `cache/scratch/verify_notebook_dos_parent.py` — **12 assertions pass**:
+  per-client/global caps bounded, held + locked clientless docs survive
+  pressure, walk bounded at 5000, non-admin rate-limited / owner exempt, normal
+  use intact; loud warnings confirmed; static greps clean.
+- **RED evidence:** new file first run 8 failed / 1 passed (the 1 is the
+  normal-use guard); cap/eviction/rate-limit/off-loop/walk-bound tests failed
+  for the right reason.
