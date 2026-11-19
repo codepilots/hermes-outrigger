@@ -2,6 +2,9 @@
 
 Reuses the vault/two_roots fixtures and ws helpers from test_notebook / test_platform.
 """
+import asyncio
+import json
+
 import pytest
 
 from outrigger import notebook, settings, tokens
@@ -9,6 +12,7 @@ from outrigger.notebook import NotebookError
 
 from helpers import start
 from test_notebook import CAPS, nb_client, two_roots, vault  # noqa: F401 (fixtures)
+from test_notebook_robustness import FakeClient
 from test_platform import adapter, next_of  # noqa: F401 (fixture)
 
 
@@ -239,3 +243,40 @@ async def test_normal_open_get_update_within_grants(aiohttp_client, two_roots):
     assert (two_roots / "Plan.md").read_text().endswith("Normal edit.")
     await ann.send_json({"type": "doc.open", "root": "notes", "path": "Projects/Garden.md"})
     assert (await next_of(ann, "doc.error"))["code"] == "no_root"   # ungranted root refused
+
+
+# ---------------------------------------------------------------- (e) decided in-flight window
+
+async def test_inflight_command_completes_after_midturn_narrowing(vault, two_roots, monkeypatch):
+    """Decided behavior (owner, 19 Nov 2026): a // command is authorized at start;
+    narrowing the user's grants mid-turn does NOT abort the in-flight turn — its
+    notebook_read/notebook_edit calls keep working until end_command. Client-initiated
+    writes are revoked immediately. Pins the F-05 residual so it cannot change silently.
+    """
+    settings.SETTINGS["notebook_roots_for"] = {"ann": ["notes", "shared"]}
+    ann = FakeClient(asyncio.get_running_loop(), cid="ann")
+    ann.principal = {"kind": "token", "user_id": "ann"}
+    allowed = notebook.allowed_roots(ann)
+    doc = notebook.open_doc("notes", "Projects/Garden.md", ann, allowed)
+    notebook.start_command(doc, ann, doc.version, None, "tidy", selection=(1, 1))
+    monkeypatch.setattr(notebook, "_session_chat", lambda: "chat-1")
+    notebook.NOTE_CHATS["chat-1"] = doc.doc_id
+
+    settings.SETTINGS["notebook_roots_for"] = {"ann": ["shared"]}   # narrow mid-turn
+    with pytest.raises(NotebookError) as e:                         # client path: revoked now
+        notebook.get(doc.doc_id, ann)
+    assert e.value.code == "not_allowed"
+
+    assert notebook.doc_for_tool("s-1") is doc                      # tool path: turn continues
+    assert json.loads(notebook.tool_read({}, session_id="s-1"))["ok"] is True
+    r = json.loads(notebook.tool_edit(
+        {"version": doc.version,
+         "edits": [{"from_line": 1, "to_line": 1, "text": "# Garden — edited mid-turn"}]},
+        session_id="s-1"))
+    assert r["ok"] is True, r
+    assert (vault / "Projects/Garden.md").read_text().startswith("# Garden — edited mid-turn")
+
+    notebook.end_command(doc)                                       # turn end closes the window
+    with pytest.raises(NotebookError) as e:
+        notebook.doc_for_tool("s-1")
+    assert e.value.code == "no_command"

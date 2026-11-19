@@ -502,7 +502,16 @@ def _session_chat() -> str | None:
 
 
 def doc_for_tool(session_id: str | None) -> Doc:
-    """The note a notebook_* call may touch: the one whose // command is running in this chat."""
+    """The note a notebook_* call may touch: the one whose // command is running in this chat.
+
+    Authorization is decided at // command start (doc.command goes through get(),
+    which re-checks root grants). Decided behavior (owner, 19 Nov 2026): narrowing a
+    user's grants mid-turn does NOT abort the in-flight command — its notebook_read /
+    notebook_edit calls keep working until end_command, because the turn was authorized
+    when it started. Client-initiated writes (doc.update / doc.undo / doc.command) are
+    fully revoked the moment grants narrow; this tool path is not a new client write
+    path. See docs/security-review/remediation.md, F-05 residuals.
+    """
     from .registry import REGISTRY
     if REGISTRY.is_subagent(session_id):
         raise NotebookError("subagent", "subagents may not edit notes")
