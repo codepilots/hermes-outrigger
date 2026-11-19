@@ -25,7 +25,7 @@ lines), commits the fix, then the ledger entry, then dispatches the next.
 
 | Item | Findings (candidate IDs) | Severity | Files | Status |
 |------|--------------------------|----------|-------|--------|
-| F-01 | SSRF via schema `$ref` (8a3f0a04) + schema-check fail-open (231342bf) | Medium + Low | protocol.py | pending |
+| F-01 | SSRF via schema `$ref` (8a3f0a04) + schema-check fail-open (231342bf) | Medium + Low | protocol.py | **fixed (f3bd438)** |
 | F-02 | Reviewer padded-args truncation (27db6f36) + `</untrusted>` delimiter escape (5a654c56) | Medium + Low | reviewer.py, dispatch.py, plugin.yaml | pending |
 | F-03 | Notebook unbounded cache + on-loop `doc.list` DoS (f3441f81) | Medium | notebook.py, ws.py | pending |
 | F-04 | Notebook watcher silent exception (245216c2) + `tool_edit` no disk refresh (b26e85aa) | Low + Low | notebook.py | pending |
@@ -48,3 +48,24 @@ and duplicate merges.
   coverage) so every fix is a clean diff against the reviewed state.
 - Declared `requirements-dev.txt`; created `.venv`; baseline 145 passed / 1 skipped.
 - Branch `security-remediation` created from `1a818f0`.
+
+### F-01 — SSRF via schema `$ref` + schema-check fail-open — FIXED (f3bd438)
+- **Delegation:** one subagent, TDD. Traced the mechanism in installed
+  jsonschema 4.26.0 / referencing as data before fixing.
+- **Fix (protocol.py only):** local-only `referencing.Registry` refuses all
+  retrieval (logged loud backstop); `check_schema` + `validate_args` reject
+  non-`#` `$ref`/`$dynamicRef`/`$recursiveRef`; `ImportError` fails closed +
+  `log.error` (was silent pass); `_type_ok` rejects unknown type keywords.
+  Local fragment refs and ReDoS/size/depth hardening preserved.
+- **Accepted deviations:** `_remote_ref` scan also in `validate_args` (covers
+  `$recursiveRef`, which the validator never evaluates, and the no-jsonschema
+  fallback); `check_schema` builds the meta-validator explicitly (classmethod
+  takes no registry); ref-like DATA in `const`/`enum` is conservatively
+  over-rejected (fail-closed by design, documented).
+- **Parent verification (independent):** full diff read; full suite re-run
+  **180 passed, 1 skipped** (145 baseline + 35 new, zero regressions);
+  parent-written probe `cache/scratch/verify_ssrf_parent.py` — **19 assertions
+  pass, 0 urlopen attempts**, fail-closed + loud logs confirmed; static-scan
+  greps on added lines clean (no eval/exec/subprocess/secret/fetch sinks).
+- **RED evidence:** new file first run 31 failed / 4 passed (the 4 are
+  regression guards); fetch tests failed with the exploit reproduced in-test.
