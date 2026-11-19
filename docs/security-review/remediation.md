@@ -30,7 +30,7 @@ lines), commits the fix, then the ledger entry, then dispatches the next.
 | F-03 | Notebook unbounded cache + on-loop `doc.list` DoS (f3441f81) | Medium | notebook.py, ws.py | **fixed (aa95320)** |
 | F-04 | Notebook watcher silent exception (245216c2) + `tool_edit` no disk refresh (b26e85aa) | Low + Low | notebook.py | **fixed (ec569df)** |
 | F-05 | Notebook stale root grants (4ea8d7ce) + doc-identity aliasing (539075fd) | Low + Low | notebook.py | **fixed (7c4608c)** |
-| F-06 | Notebook shared-root indirect injection labeling (39fe8161) | Low | notebook.py, dispatch.py | pending |
+| F-06 | Notebook shared-root indirect injection labeling (39fe8161) | Low | notebook.py | **fixed (43c5d82)** |
 | F-07 | Unbounded 4 MB error relay (0bf92726) | Low | dispatch.py, ws.py | pending |
 | F-08 | Subagent marker eviction fail-open (9c9370fa) | Low | registry.py, __init__.py | pending |
 | F-09 | Audit silent loss + identity + tamper (f37f9e4d) + artifact permissions (2eaf3124) + malformed-request unrecorded (6af3ae03) | Inconclusive→fix + Info | audit.py, dispatch.py, notebook.py, ws.py | pending |
@@ -182,3 +182,31 @@ and duplicate merges.
 - **RED evidence:** new file first run 7 failed / 2 passed (the 2 are
   preservation guards); grant-recheck and alias-coalescing tests failed for the
   right reason.
+
+### F-06 — Notebook shared-root indirect-injection labeling — FIXED (43c5d82)
+- **Delegation:** one subagent, TDD. dispatch.py untouched (_format_ok already
+  labels client results; notebook_read needed its own label).
+- **Fix (labeling hardening, behavior-preserving):** `tool_read` result carries
+  `untrusted:True`; `READ_SCHEMA` description states note content may be
+  collaborator-written and is untrusted data, never instructions;
+  `command_message` frames the note body as untrusted data to edit (the user's
+  // instruction is the intent), preserving the read/edit workflow + one-line
+  reply. Lock/snapshot logic untouched.
+- **Accepted deviations:** new test file adds an autouse `_keep_session_env`
+  restore fixture — REQUIRED for suite determinism because test_fuzz.py's
+  `plat` fixture installs a persistent fake gateway with no teardown and
+  conftest does not reset SESSION_ENV; without restore the new tests leaked
+  SESSION_ENV into test_outrigger.py (14 failures). Test-only, state-neutral.
+- **Residual (test hygiene, out of F-06 scope):** test_fuzz.py's fake-gateway
+  persistence + conftest not resetting SESSION_ENV is a pre-existing test-
+  isolation weakness; flag for the audit/test pass.
+- **Parent verification (independent):** full diff read; suite re-run TWICE
+  **239 passed, 1 skipped** (234 + 5 new, zero regressions, deterministic);
+  parent probe `cache/scratch/verify_injection_parent.py` — **12 assertions
+  pass**: injection payloads returned as data labeled untrusted:True (full +
+  ranged), command_message frames data + keeps instruction/workflow (inline +
+  selection), schema honest, version/note/total_lines preserved; static greps
+  clean.
+- **RED evidence:** new file first run 4 failed / 1 passed (the 1 is the
+  preservation guard); schema/command_message/tool_read labeling tests failed
+  for the right reason (the // flow itself passed).
